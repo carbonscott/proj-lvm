@@ -30,3 +30,14 @@ cropped_tensor = F.center_crop(image_tensor, (1000, 1000))
 cropped_array_2 = cropped_tensor.numpy()
 print(f"Cropped shape (method 2): {cropped_array_2.shape}")
 ```
+
+
+### Data broken down into non-overlapping regions
+
+```python
+import torch
+import einops
+
+image_tensor = torch.rand(4, 1, 2048, 2048)
+image_tensor_unfold_einops = einops.rearrange(image_tensor, 'B C (pH nH) (pW nW) -> B C nH nW pH pW', pH=256, pW=256)
+```
