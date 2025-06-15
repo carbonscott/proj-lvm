@@ -12,6 +12,10 @@ Train a Large Vision Model on Clean LCLS diffraction/scattering images.
 
 **What tasks should we use to validate this foundation model?**
 
+## Methods
+
+I think HIPT has a good chance.
+
 ## Tasks
 
 What technique is likely used to capture this image?
