@@ -123,6 +123,7 @@ MPI Job with NUMA Awareness#!/bin/bash
 
 # Let Slurm handle binding
 srun --cpu-bind=cores --distribution=block:block mpirun --bind-to none ./mpi_program
+```
 
 ## Example - AMD EPYC 7713 64-Core Processor
 
