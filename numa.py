@@ -5,6 +5,7 @@ import os
 import sys
 import json
 from pathlib import Path
+import shutil
 
 def get_numa_topology():
     """Get NUMA topology information."""
@@ -31,51 +32,80 @@ def get_numa_topology():
     except subprocess.CalledProcessError:
         print("Error: Failed to get NUMA topology. Is numactl installed?")
         sys.exit(1)
+    except FileNotFoundError:
+        print("Error: numactl command not found. Please install numactl package.")
+        sys.exit(1)
+
+def is_nvidia_available():
+    """Check if NVIDIA tools are available on the system."""
+    return shutil.which('nvidia-smi') is not None
 
 def get_gpu_topology():
     """Get GPU topology information and NUMA affinity."""
-    gpu_info = {}
+    gpu_info = {'gpu_count': 0}
+
+    # Early return if nvidia-smi is not available
+    if not is_nvidia_available():
+        print("Notice: No NVIDIA GPU tools detected. Running in CPU-only mode.")
+        return gpu_info
+
     try:
         # Get number of GPUs - use nvidia-smi -L instead which is more reliable
         gpu_list_output = subprocess.check_output(['nvidia-smi', '-L'], universal_newlines=True)
         gpu_count = len(gpu_list_output.strip().split('\n'))
         gpu_info['gpu_count'] = gpu_count
 
+        if gpu_count == 0:
+            return gpu_info
+
         # Get PCIe bus ID and NUMA node for each GPU
         for gpu in range(gpu_info['gpu_count']):
-            bus_id = subprocess.check_output(['nvidia-smi', '-i', str(gpu), '--query-gpu=pci.bus_id', '--format=csv,noheader'], universal_newlines=True).strip()
-            gpu_info[f'gpu{gpu}_bus_id'] = bus_id
-
-            # Clean up bus ID format for lspci
-            clean_bus_id = bus_id.split(':')[-2] + ':' + bus_id.split(':')[-1]
-
-            # Get NUMA node for this GPU using lspci
             try:
-                numa_output = subprocess.check_output(['lspci', '-vv', '-s', clean_bus_id], universal_newlines=True)
-                numa_match = re.search(r'NUMA node: (\d+)', numa_output)
-                if numa_match:
-                    gpu_info[f'gpu{gpu}_numa_node'] = int(numa_match.group(1))
-                else:
-                    gpu_info[f'gpu{gpu}_numa_node'] = 0  # Default to node 0 if not found
-            except subprocess.CalledProcessError:
-                # Fall back to nvidia-smi topo if available in newer drivers
-                try:
-                    topo_output = subprocess.check_output(['nvidia-smi', 'topo', '-n', str(gpu)], universal_newlines=True)
-                    numa_match = re.search(r'NUMA node (\d+)', topo_output)
-                    if numa_match:
-                        gpu_info[f'gpu{gpu}_numa_node'] = int(numa_match.group(1))
-                    else:
-                        gpu_info[f'gpu{gpu}_numa_node'] = 0
-                except subprocess.CalledProcessError:
-                    gpu_info[f'gpu{gpu}_numa_node'] = 0
+                bus_id = subprocess.check_output(['nvidia-smi', '-i', str(gpu), '--query-gpu=pci.bus_id', '--format=csv,noheader'], universal_newlines=True).strip()
+                gpu_info[f'gpu{gpu}_bus_id'] = bus_id
 
-            # Get GPU name
-            gpu_name = subprocess.check_output(['nvidia-smi', '-i', str(gpu), '--query-gpu=name', '--format=csv,noheader'], universal_newlines=True).strip()
-            gpu_info[f'gpu{gpu}_name'] = gpu_name
+                # Clean up bus ID format for lspci
+                clean_bus_id = bus_id.split(':')[-2] + ':' + bus_id.split(':')[-1]
+
+                # Get NUMA node for this GPU using lspci
+                try:
+                    # Check if lspci is available
+                    if shutil.which('lspci') is not None:
+                        numa_output = subprocess.check_output(['lspci', '-vv', '-s', clean_bus_id], universal_newlines=True)
+                        numa_match = re.search(r'NUMA node: (\d+)', numa_output)
+                        if numa_match:
+                            gpu_info[f'gpu{gpu}_numa_node'] = int(numa_match.group(1))
+                        else:
+                            gpu_info[f'gpu{gpu}_numa_node'] = 0  # Default to node 0 if not found
+                    else:
+                        # lspci not available, try nvidia-smi topo instead
+                        raise FileNotFoundError("lspci not available")
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    # Fall back to nvidia-smi topo if available in newer drivers
+                    try:
+                        topo_output = subprocess.check_output(['nvidia-smi', 'topo', '-n', str(gpu)], universal_newlines=True)
+                        numa_match = re.search(r'NUMA node (\d+)', topo_output)
+                        if numa_match:
+                            gpu_info[f'gpu{gpu}_numa_node'] = int(numa_match.group(1))
+                        else:
+                            gpu_info[f'gpu{gpu}_numa_node'] = 0
+                    except subprocess.CalledProcessError:
+                        gpu_info[f'gpu{gpu}_numa_node'] = 0
+
+                # Get GPU name
+                gpu_name = subprocess.check_output(['nvidia-smi', '-i', str(gpu), '--query-gpu=name', '--format=csv,noheader'], universal_newlines=True).strip()
+                gpu_info[f'gpu{gpu}_name'] = gpu_name
+            except subprocess.CalledProcessError:
+                # Handle errors for individual GPUs
+                gpu_info[f'gpu{gpu}_name'] = "Unknown"
+                gpu_info[f'gpu{gpu}_numa_node'] = 0
 
         return gpu_info
-    except subprocess.CalledProcessError:
-        print("Warning: No NVIDIA GPUs detected or nvidia-smi not available.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Notice: Unable to get GPU information. Running in CPU-only mode.")
+        return {'gpu_count': 0}
+    except Exception as e:
+        print(f"Warning: Error while getting GPU information: {str(e)}. Running in CPU-only mode.")
         return {'gpu_count': 0}
 
 def determine_optimal_binding(numa_info, gpu_info, target_gpus=None):
@@ -170,7 +200,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Determine optimal NUMA binding for PyTorch with GPUs')
     parser.add_argument('--gpus', type=str, help='Target GPUs (comma-separated, e.g., "0,1,3")')
-    parser.add_argument('--strategy', type=str, choices=['single', 'interleave', 'preferred', 'auto'], 
+    parser.add_argument('--strategy', type=str, choices=['single', 'interleave', 'preferred', 'auto'],
                       default='auto', help='Binding strategy')
     parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
 
@@ -232,6 +262,9 @@ def main():
         print("\n=== GPU NUMA Affinity ===")
         for gpu in range(gpu_info['gpu_count']):
             print(f"GPU {gpu} ({gpu_info[f'gpu{gpu}_name']}): NUMA Node {gpu_info[f'gpu{gpu}_numa_node']}")
+    else:
+        print("\n=== GPU Information ===")
+        print("No GPUs detected. Running in CPU-only mode.")
 
     print("\n=== Binding Decision ===")
     print(f"Strategy: {binding['strategy']}")
