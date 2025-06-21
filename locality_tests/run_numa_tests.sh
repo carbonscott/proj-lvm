@@ -10,6 +10,10 @@ NIC_NUMA_NODE=2  # enp69s0f0 is on NUMA node 2
 NUM_SAMPLES=1000
 NETWORK_PORT=5555
 IPC_PATH="/tmp/numa_ipc_test"
+TENSOR_SHAPE="1 224 224"
+BATCH_BUFFER_SIZE=10
+MEMORY_SIZE_MB=100
+TIMEOUT_MS=10000
 
 # Colors for output
 RED='\033[0;31m'
@@ -78,6 +82,9 @@ run_network_test() {
         python3 numa_network_test_pusher.py \
         --address "tcp://0.0.0.0:$NETWORK_PORT" \
         --num-samples $NUM_SAMPLES \
+        --shape $TENSOR_SHAPE \
+        --batch-buffer-size $BATCH_BUFFER_SIZE \
+        --memory-size-mb $MEMORY_SIZE_MB \
         --nic-numa $NIC_NUMA_NODE &
     PUSHER_PID=$!
 
@@ -90,6 +97,9 @@ run_network_test() {
         python3 numa_network_test_puller.py \
         --address "tcp://127.0.0.1:$NETWORK_PORT" \
         --expected-samples $NUM_SAMPLES \
+        --timeout $TIMEOUT_MS \
+        --batch-buffer-size $BATCH_BUFFER_SIZE \
+        --memory-size-mb $MEMORY_SIZE_MB \
         --nic-numa $NIC_NUMA_NODE
 
     # Clean up pusher
@@ -117,7 +127,10 @@ run_ipc_test() {
     numactl --cpunodebind=$pusher_numa --membind=$pusher_numa \
         python3 numa_ipc_test_pusher.py \
         --ipc-path $IPC_PATH \
-        --num-samples $NUM_SAMPLES &
+        --num-samples $NUM_SAMPLES \
+        --shape $TENSOR_SHAPE \
+        --batch-buffer-size $BATCH_BUFFER_SIZE \
+        --memory-size-mb $MEMORY_SIZE_MB &
     PUSHER_PID=$!
 
     # Wait a moment for pusher to start
@@ -128,7 +141,10 @@ run_ipc_test() {
     numactl --cpunodebind=$puller_numa --membind=$puller_numa \
         python3 numa_ipc_test_puller.py \
         --ipc-path $IPC_PATH \
-        --expected-samples $NUM_SAMPLES
+        --expected-samples $NUM_SAMPLES \
+        --timeout $TIMEOUT_MS \
+        --batch-buffer-size $BATCH_BUFFER_SIZE \
+        --memory-size-mb $MEMORY_SIZE_MB
 
     # Clean up
     kill $PUSHER_PID 2>/dev/null
@@ -182,20 +198,25 @@ usage() {
     echo "  topology   Show NUMA topology only"
     echo ""
     echo "OPTIONS:"
-    echo "  -n SAMPLES    Number of samples per test (default: $NUM_SAMPLES)"
-    echo "  -p PORT       Network port (default: $NETWORK_PORT)"
-    echo "  -i PATH       IPC socket path (default: $IPC_PATH)"
-    echo "  -h            Show this help"
+    echo "  -n SAMPLES         Number of samples per test (default: $NUM_SAMPLES)"
+    echo "  -p PORT            Network port (default: $NETWORK_PORT)"
+    echo "  -i PATH            IPC socket path (default: $IPC_PATH)"
+    echo "  -s \"C H W\"         Tensor shape (default: \"$TENSOR_SHAPE\")"
+    echo "  -b BUFFER_SIZE     Batch-buffer size (default: $BATCH_BUFFER_SIZE)"
+    echo "  -m MEMORY_MB       Memory pool size in MB (default: $MEMORY_SIZE_MB)"
+    echo "  -t TIMEOUT_MS      Socket timeout in ms (default: $TIMEOUT_MS)"
+    echo "  -h                 Show this help"
     echo ""
     echo "Examples:"
-    echo "  $0                          # Run all tests"
-    echo "  $0 network                  # Run network tests only"
-    echo "  $0 ipc                      # Run IPC tests only"
-    echo "  $0 -n 2000 network         # Run network tests with 2000 samples"
+    echo "  $0                                    # Run all tests"
+    echo "  $0 network                            # Run network tests only"
+    echo "  $0 ipc                                # Run IPC tests only"
+    echo "  $0 -n 2000 network                   # Run network tests with 2000 samples"
+    echo "  $0 -s \"3 512 512\" -b 20 all         # Custom tensor shape and buffer size"
 }
 
 # Parse command line arguments
-while getopts "n:p:i:h" opt; do
+while getopts "n:p:i:s:b:m:t:h" opt; do
     case $opt in
         n)
             NUM_SAMPLES=$OPTARG
@@ -205,6 +226,18 @@ while getopts "n:p:i:h" opt; do
             ;;
         i)
             IPC_PATH=$OPTARG
+            ;;
+        s)
+            TENSOR_SHAPE=$OPTARG
+            ;;
+        b)
+            BATCH_BUFFER_SIZE=$OPTARG
+            ;;
+        m)
+            MEMORY_SIZE_MB=$OPTARG
+            ;;
+        t)
+            TIMEOUT_MS=$OPTARG
             ;;
         h)
             usage

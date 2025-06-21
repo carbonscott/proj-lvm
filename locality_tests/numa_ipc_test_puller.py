@@ -42,12 +42,21 @@ def bytes_to_tensor(data, shape):
 def run_ipc_pull_test(
     ipc_path,
     expected_samples=1000,
-    timeout_ms=5000,
+    timeout_ms=10000,
+    batch_buffer_size=10,
     memory_size_mb=100,
     process_data=True
 ):
     """
     Run IPC pull test with memory allocation to test NUMA effects
+
+    Args:
+        ipc_path: IPC socket path
+        expected_samples: Expected number of test samples
+        timeout_ms: Socket timeout in milliseconds
+        batch_buffer_size: Size for both batching and processing buffer
+        memory_size_mb: Size of memory pool in MB for NUMA testing
+        process_data: Whether to process received tensors
     """
 
     numa_info = get_numa_info()
@@ -58,6 +67,7 @@ def run_ipc_pull_test(
     print(f"IPC Path: {ipc_path}")
     print(f"Expected Samples: {expected_samples}")
     print(f"Timeout: {timeout_ms}ms")
+    print(f"Batch-Buffer Size: {batch_buffer_size}")
     print(f"Memory Pool Size: {memory_size_mb} MB")
     print(f"Process Data: {process_data}")
     print("=" * 50)
@@ -65,7 +75,7 @@ def run_ipc_pull_test(
     # Allocate memory on current NUMA node to test memory locality
     print(f"Allocating {memory_size_mb} MB memory pool on current NUMA node...")
     memory_pool = torch.randn(memory_size_mb * 1024 * 1024 // 4)  # 4 bytes per float32
-    processing_buffer = torch.zeros(10, 3, 224, 224)  # Buffer for tensor processing
+    processing_buffer = torch.zeros(batch_buffer_size, 1, 224, 224)  # Will be resized when we know actual shape
     print(f"Memory pool allocated: {memory_pool.element_size() * memory_pool.nelement() / 1024 / 1024:.2f} MB")
 
     ipc_address = f"ipc://{ipc_path}"
@@ -89,10 +99,10 @@ def run_ipc_pull_test(
         memory_access_times = []
 
         # Batch timing
-        batch_size = 10
         batch_times = []
         batch_start_time = None
         batch_count = 0
+        processing_buffer_initialized = False
 
         print("Starting to receive data...")
 
@@ -113,7 +123,13 @@ def run_ipc_pull_test(
                         metadata = eval(metadata_str)
                         is_warmup = metadata.get('is_warmup', False)
                         sample_index = metadata.get('index', received_count)
-                        tensor_shape = metadata.get('shape', (3, 224, 224))
+                        tensor_shape = metadata.get('shape', (1, 224, 224))
+
+                        # Initialize processing buffer with correct shape on first real tensor
+                        if not processing_buffer_initialized and not is_warmup:
+                            processing_buffer = torch.zeros(batch_buffer_size, *tensor_shape)
+                            processing_buffer_initialized = True
+                            print(f"Processing buffer initialized: {processing_buffer.shape}")
 
                         # Memory access test
                         mem_start = time.time()
@@ -122,7 +138,7 @@ def run_ipc_pull_test(
                         memory_access_times.append(mem_time)
 
                         # Data processing test
-                        if process_data:
+                        if process_data and processing_buffer_initialized:
                             proc_start = time.time()
                             tensor = bytes_to_tensor(data, tensor_shape)
                             if tensor is not None:
@@ -152,15 +168,15 @@ def run_ipc_pull_test(
                             # Batch timing
                             if batch_start_time is not None:
                                 batch_count += 1
-                                if batch_count >= batch_size:
+                                if batch_count >= batch_buffer_size:
                                     batch_time = time.time() - batch_start_time
                                     batch_times.append(batch_time)
 
                                     if len(batch_times) % 10 == 0:
                                         avg_batch_time = np.mean(batch_times[-10:])
-                                        avg_mem_time = np.mean(memory_access_times[-10*batch_size:])
-                                        avg_proc_time = np.mean(processing_times[-10*batch_size:]) if processing_times else 0
-                                        throughput = (batch_size * len(data)) / avg_batch_time / (1024*1024)
+                                        avg_mem_time = np.mean(memory_access_times[-10*batch_buffer_size:])
+                                        avg_proc_time = np.mean(processing_times[-10*batch_buffer_size:]) if processing_times else 0
+                                        throughput = (batch_buffer_size * len(data)) / avg_batch_time / (1024*1024)
                                         print(f"Batch {len(batch_times)}: {avg_batch_time:.4f}s, "
                                               f"{throughput:.2f} MB/s, mem: {avg_mem_time*1000:.3f}ms, "
                                               f"proc: {avg_proc_time*1000:.3f}ms")
@@ -247,8 +263,10 @@ def main():
                         help='IPC socket path')
     parser.add_argument('--expected-samples', type=int, default=1000,
                         help='Expected number of test samples')
-    parser.add_argument('--timeout', type=int, default=5000,
+    parser.add_argument('--timeout', type=int, default=10000,
                         help='Socket timeout in milliseconds')
+    parser.add_argument('--batch-buffer-size', type=int, default=10,
+                        help='Size for both batching and processing buffer')
     parser.add_argument('--memory-size-mb', type=int, default=100,
                         help='Size of memory pool in MB')
     parser.add_argument('--no-process', action='store_true',
@@ -260,6 +278,7 @@ def main():
         args.ipc_path,
         args.expected_samples,
         args.timeout,
+        args.batch_buffer_size,
         args.memory_size_mb,
         not args.no_process
     )

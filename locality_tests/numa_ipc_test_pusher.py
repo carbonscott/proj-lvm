@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+def run_ipc_push_test(
+    ipc_path,
+    tensor_shape=(1, 224, 224),
+    num_samples=1000,
+    batch_buffer_#!/usr/bin/env python3
 """
 NUMA IPC Test - Data Pusher
 
@@ -39,14 +43,22 @@ def tensor_to_bytes(tensor):
 
 def run_ipc_push_test(
     ipc_path,
-    tensor_shape=(3, 224, 224),
+    tensor_shape=(1, 224, 224),
     num_samples=1000,
-    batch_size=10,
+    batch_buffer_size=10,
     warmup_samples=100,
     memory_size_mb=100
 ):
     """
     Run IPC push test with memory allocation to test NUMA effects
+
+    Args:
+        ipc_path: IPC socket path
+        tensor_shape: Shape of tensors to generate
+        num_samples: Total samples to push
+        batch_buffer_size: Size for both batching and memory buffer
+        warmup_samples: Number of samples for warmup
+        memory_size_mb: Size of memory pool in MB for NUMA testing
     """
 
     numa_info = get_numa_info()
@@ -57,7 +69,7 @@ def run_ipc_push_test(
     print(f"IPC Path: {ipc_path}")
     print(f"Tensor Shape: {tensor_shape}")
     print(f"Total Samples: {num_samples}")
-    print(f"Batch Size: {batch_size}")
+    print(f"Batch-Buffer Size: {batch_buffer_size}")
     print(f"Warmup Samples: {warmup_samples}")
     print(f"Memory Pool Size: {memory_size_mb} MB")
     print("=" * 50)
@@ -113,8 +125,8 @@ def run_ipc_push_test(
 
         test_start = time.time()
 
-        for batch_start in range(warmup_samples, total_samples, batch_size):
-            batch_end = min(batch_start + batch_size, total_samples)
+        for batch_start in range(warmup_samples, total_samples, batch_buffer_size):
+            batch_end = min(batch_start + batch_buffer_size, total_samples)
             current_batch_size = batch_end - batch_start
 
             batch_start_time = time.time()
@@ -169,12 +181,12 @@ def main():
     parser = argparse.ArgumentParser(description='NUMA IPC Push Test')
     parser.add_argument('--ipc-path', default='/tmp/numa_ipc_test',
                         help='IPC socket path')
-    parser.add_argument('--shape', nargs=3, type=int, default=[3, 224, 224],
+    parser.add_argument('--shape', nargs=3, type=int, default=[1, 224, 224],
                         help='Tensor shape (C H W)')
     parser.add_argument('--num-samples', type=int, default=1000,
                         help='Number of samples to push')
-    parser.add_argument('--batch-size', type=int, default=10,
-                        help='Batch size for measurements')
+    parser.add_argument('--batch-buffer-size', type=int, default=10,
+                        help='Size for both batching and memory buffer')
     parser.add_argument('--warmup-samples', type=int, default=100,
                         help='Number of warmup samples')
     parser.add_argument('--memory-size-mb', type=int, default=100,
@@ -191,7 +203,7 @@ def main():
         ipc_address,
         tuple(args.shape),
         args.num_samples,
-        args.batch_size,
+        args.batch_buffer_size,
         args.warmup_samples,
         args.memory_size_mb
     )

@@ -42,11 +42,23 @@ def bytes_to_tensor(data, shape):
 def run_network_pull_test(
     address,
     expected_samples=1000,
-    timeout_ms=5000,
-    nic_numa_node=None
+    timeout_ms=10000,
+    batch_buffer_size=10,
+    memory_size_mb=100,
+    nic_numa_node=None,
+    process_data=True
 ):
     """
     Run network pull test with detailed timing measurements
+
+    Args:
+        address: Network address to pull from
+        expected_samples: Expected number of test samples
+        timeout_ms: Socket timeout in milliseconds
+        batch_buffer_size: Size for both batching and processing buffer
+        memory_size_mb: Size of memory pool in MB for NUMA testing
+        nic_numa_node: Expected NUMA node of the NIC (for reporting)
+        process_data: Whether to process received tensors
     """
 
     numa_info = get_numa_info()
@@ -58,11 +70,20 @@ def run_network_pull_test(
     print(f"Pull Address: {address}")
     print(f"Expected Samples: {expected_samples}")
     print(f"Timeout: {timeout_ms}ms")
+    print(f"Batch-Buffer Size: {batch_buffer_size}")
+    print(f"Memory Pool Size: {memory_size_mb} MB")
+    print(f"Process Data: {process_data}")
     print("=" * 50)
 
     with Pull0(dial=address) as sock:
         sock.recv_timeout = timeout_ms
         print(f"Connected to {address}")
+
+        # Allocate memory on current NUMA node to test memory locality
+        print(f"Allocating {memory_size_mb} MB memory pool on current NUMA node...")
+        memory_pool = torch.randn(memory_size_mb * 1024 * 1024 // 4)  # 4 bytes per float32
+        processing_buffer = torch.zeros(batch_buffer_size, 1, 224, 224)  # Will be resized when we know actual shape
+        print(f"Memory pool allocated: {memory_pool.element_size() * memory_pool.nelement() / 1024 / 1024:.2f} MB")
 
         # Statistics tracking
         received_count = 0
@@ -75,12 +96,14 @@ def run_network_pull_test(
         first_recv_time = None
         test_start_time = None
         receive_times = []
+        processing_times = []
+        memory_access_times = []
 
         # Batch timing (for consistent measurement)
-        batch_size = 10
         batch_times = []
         batch_start_time = None
         batch_count = 0
+        processing_buffer_initialized = False
 
         print("Starting to receive data...")
 
@@ -101,7 +124,32 @@ def run_network_pull_test(
                         metadata = eval(metadata_str)
                         is_warmup = metadata.get('is_warmup', False)
                         sample_index = metadata.get('index', received_count)
-                        tensor_shape = metadata.get('shape', (3, 224, 224))
+                        tensor_shape = metadata.get('shape', (1, 224, 224))
+
+                        # Initialize processing buffer with correct shape on first real tensor
+                        if not processing_buffer_initialized and not is_warmup:
+                            processing_buffer = torch.zeros(batch_buffer_size, *tensor_shape)
+                            processing_buffer_initialized = True
+                            print(f"Processing buffer initialized: {processing_buffer.shape}")
+
+                        # Memory access test
+                        mem_start = time.time()
+                        memory_sum = memory_pool[:(512*1024)].sum()  # Touch 2MB
+                        mem_time = time.time() - mem_start
+                        memory_access_times.append(mem_time)
+
+                        # Data processing test
+                        if process_data and processing_buffer_initialized:
+                            proc_start = time.time()
+                            tensor = bytes_to_tensor(data, tensor_shape)
+                            if tensor is not None:
+                                # Simulate processing: copy to buffer and do some computation
+                                buffer_idx = received_count % processing_buffer.shape[0]
+                                processing_buffer[buffer_idx] = tensor
+                                # Simple computation to force memory access
+                                result = processing_buffer[buffer_idx].mean()
+                            proc_time = time.time() - proc_start
+                            processing_times.append(proc_time)
 
                         received_count += 1
                         total_bytes += len(data)
@@ -121,24 +169,29 @@ def run_network_pull_test(
                             # Batch timing
                             if batch_start_time is not None:
                                 batch_count += 1
-                                if batch_count >= batch_size:
+                                if batch_count >= batch_buffer_size:
                                     batch_time = time.time() - batch_start_time
                                     batch_times.append(batch_time)
 
                                     if len(batch_times) % 10 == 0:
                                         avg_batch_time = np.mean(batch_times[-10:])
-                                        throughput = (batch_size * len(data)) / avg_batch_time / (1024*1024)
-                                        print(f"Batch {len(batch_times)}: {avg_batch_time:.4f}s, {throughput:.2f} MB/s")
+                                        avg_mem_time = np.mean(memory_access_times[-10*batch_buffer_size:])
+                                        avg_proc_time = np.mean(processing_times[-10*batch_buffer_size:]) if processing_times else 0
+                                        throughput = (batch_buffer_size * len(data)) / avg_batch_time / (1024*1024)
+                                        print(f"Batch {len(batch_times)}: {avg_batch_time:.4f}s, "
+                                              f"{throughput:.2f} MB/s, mem: {avg_mem_time*1000:.3f}ms, "
+                                              f"proc: {avg_proc_time*1000:.3f}ms")
 
                                     batch_start_time = time.time()
                                     batch_count = 0
 
                         # Verify tensor reconstruction (occasionally)
                         if received_count <= 5 or received_count % 200 == 0:
-                            tensor = bytes_to_tensor(data, tensor_shape)
-                            if tensor is not None:
-                                print(f"Sample {sample_index}: shape={tensor.shape}, "
-                                      f"min/max/mean={tensor.min():.3f}/{tensor.max():.3f}/{tensor.mean():.3f}")
+                            if process_data:
+                                tensor = bytes_to_tensor(data, tensor_shape)
+                                if tensor is not None:
+                                    print(f"Sample {sample_index}: shape={tensor.shape}, "
+                                          f"min/max/mean={tensor.min():.3f}/{tensor.max():.3f}/{tensor.mean():.3f}")
 
                         # Check if we've received expected test samples
                         if test_count >= expected_samples:
@@ -182,6 +235,20 @@ def run_network_pull_test(
             print(f"  Min: {np.min(receive_times):.6f}s")
             print(f"  Max: {np.max(receive_times):.6f}s")
 
+        if memory_access_times:
+            print(f"Memory access statistics:")
+            print(f"  Mean: {np.mean(memory_access_times)*1000:.4f}ms")
+            print(f"  Std: {np.std(memory_access_times)*1000:.4f}ms")
+            print(f"  Min: {np.min(memory_access_times)*1000:.4f}ms")
+            print(f"  Max: {np.max(memory_access_times)*1000:.4f}ms")
+
+        if processing_times and process_data:
+            print(f"Processing time statistics:")
+            print(f"  Mean: {np.mean(processing_times)*1000:.4f}ms")
+            print(f"  Std: {np.std(processing_times)*1000:.4f}ms")
+            print(f"  Min: {np.min(processing_times)*1000:.4f}ms")
+            print(f"  Max: {np.max(processing_times)*1000:.4f}ms")
+
         if batch_times:
             print(f"Batch time statistics:")
             print(f"  Mean: {np.mean(batch_times):.4f}s")
@@ -197,10 +264,16 @@ def main():
                         help='Network address to pull from')
     parser.add_argument('--expected-samples', type=int, default=1000,
                         help='Expected number of test samples')
-    parser.add_argument('--timeout', type=int, default=5000,
+    parser.add_argument('--timeout', type=int, default=10000,
                         help='Socket timeout in milliseconds')
+    parser.add_argument('--batch-buffer-size', type=int, default=10,
+                        help='Size for both batching and processing buffer')
+    parser.add_argument('--memory-size-mb', type=int, default=100,
+                        help='Size of memory pool in MB')
     parser.add_argument('--nic-numa', type=int, default=None,
                         help='NUMA node where the NIC is located')
+    parser.add_argument('--no-process', action='store_true',
+                        help='Skip tensor processing (just receive)')
 
     args = parser.parse_args()
 
@@ -208,7 +281,10 @@ def main():
         args.address,
         args.expected_samples,
         args.timeout,
-        args.nic_numa
+        args.batch_buffer_size,
+        args.memory_size_mb,
+        args.nic_numa,
+        not args.no_process
     )
 
 if __name__ == '__main__':
