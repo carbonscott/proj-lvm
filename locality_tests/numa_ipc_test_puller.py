@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import os
 import psutil
+import json
 from pynng import Pull0, Timeout
 
 def get_numa_info():
@@ -102,6 +103,7 @@ def run_ipc_pull_test(
         batch_times = []
         batch_start_time = None
         batch_count = 0
+        batch_bytes = 0
         processing_buffer_initialized = False
 
         print("Starting to receive data...")
@@ -120,7 +122,7 @@ def run_ipc_pull_test(
                 if newline_index != -1:
                     metadata_str = data[:newline_index].decode('utf-8')
                     try:
-                        metadata = eval(metadata_str)
+                        metadata = json.loads(metadata_str)
                         is_warmup = metadata.get('is_warmup', False)
                         sample_index = metadata.get('index', received_count)
                         tensor_shape = metadata.get('shape', (1, 224, 224))
@@ -160,7 +162,7 @@ def run_ipc_pull_test(
                             if test_start_time is None:
                                 test_start_time = time.time()
                                 batch_start_time = test_start_time
-                                print("Test phase started")
+                                batch_bytes = 0
 
                             test_count += 1
                             test_bytes += len(data)
@@ -168,6 +170,7 @@ def run_ipc_pull_test(
                             # Batch timing
                             if batch_start_time is not None:
                                 batch_count += 1
+                                batch_bytes += len(data)
                                 if batch_count >= batch_buffer_size:
                                     batch_time = time.time() - batch_start_time
                                     batch_times.append(batch_time)
@@ -176,13 +179,16 @@ def run_ipc_pull_test(
                                         avg_batch_time = np.mean(batch_times[-10:])
                                         avg_mem_time = np.mean(memory_access_times[-10*batch_buffer_size:])
                                         avg_proc_time = np.mean(processing_times[-10*batch_buffer_size:]) if processing_times else 0
-                                        throughput = (batch_buffer_size * len(data)) / avg_batch_time / (1024*1024)
+
+                                        # NOTE: Throughput calculation assumes all messages are the same size
+                                        throughput = batch_bytes / avg_batch_time / (1024*1024)
                                         print(f"Batch {len(batch_times)}: {avg_batch_time:.4f}s, "
                                               f"{throughput:.2f} MB/s, mem: {avg_mem_time*1000:.3f}ms, "
                                               f"proc: {avg_proc_time*1000:.3f}ms")
 
                                     batch_start_time = time.time()
                                     batch_count = 0
+                                    batch_bytes = 0
 
                         # Verify tensor reconstruction (occasionally)
                         if received_count <= 5 or received_count % 200 == 0:
@@ -258,9 +264,9 @@ def run_ipc_pull_test(
         print("=" * 50)
 
 def main():
-    parser = argparse.ArgumentParser(description='NUMA IPC Pull Test')
-    parser.add_argument('--ipc-path', default='/tmp/numa_ipc_test',
-                        help='IPC socket path')
+    parser = argparse.ArgumentParser(description='NUMA Network Pull Test')
+    parser.add_argument('--address', default='tcp://127.0.0.1:5555',
+                        help='Network address to pull from')
     parser.add_argument('--expected-samples', type=int, default=1000,
                         help='Expected number of test samples')
     parser.add_argument('--timeout', type=int, default=10000,
@@ -269,17 +275,20 @@ def main():
                         help='Size for both batching and processing buffer')
     parser.add_argument('--memory-size-mb', type=int, default=100,
                         help='Size of memory pool in MB')
+    parser.add_argument('--nic-numa', type=int, default=None,
+                        help='NUMA node where the NIC is located')
     parser.add_argument('--no-process', action='store_true',
                         help='Skip tensor processing (just receive)')
 
     args = parser.parse_args()
 
-    run_ipc_pull_test(
-        args.ipc_path,
+    run_network_pull_test(
+        args.address,
         args.expected_samples,
         args.timeout,
         args.batch_buffer_size,
         args.memory_size_mb,
+        args.nic_numa,
         not args.no_process
     )
 

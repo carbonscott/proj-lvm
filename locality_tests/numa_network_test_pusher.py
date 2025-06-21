@@ -80,8 +80,21 @@ def run_network_push_test(
         memory_pool = torch.randn(memory_size_mb * 1024 * 1024 // 4)  # 4 bytes per float32
         print(f"Memory pool allocated: {memory_pool.element_size() * memory_pool.nelement() / 1024 / 1024:.2f} MB")
 
+
+        # Calculate pre-allocation memory requirements
+        total_samples = warmup_samples + num_samples
+        tensor_size_bytes = np.prod(tensor_shape) * 4  # float32 = 4 bytes
+        estimated_total_mb = (total_samples * tensor_size_bytes) / (1024 * 1024)
+
         # Pre-generate tensors to minimize generation overhead during test
         print("Pre-generating test data...")
+        print(f"Estimated memory for {total_samples} tensors: {estimated_total_mb:.1f} MB")
+
+        # Warning for large allocations
+        if estimated_total_mb > 1000:  # 1GB threshold
+            print(f"WARNING: Large memory allocation ({estimated_total_mb:.1f} MB) may cause memory pressure!")
+            print(f"Consider reducing --num-samples or tensor size if system has limited RAM")
+
         test_tensors = []
         total_samples = warmup_samples + num_samples
 

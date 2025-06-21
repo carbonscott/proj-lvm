@@ -177,6 +177,8 @@ def run_network_pull_test(
                                         avg_batch_time = np.mean(batch_times[-10:])
                                         avg_mem_time = np.mean(memory_access_times[-10*batch_buffer_size:])
                                         avg_proc_time = np.mean(processing_times[-10*batch_buffer_size:]) if processing_times else 0
+
+                                        # NOTE: Throughput calculation assumes all messages are the same size
                                         throughput = (batch_buffer_size * len(data)) / avg_batch_time / (1024*1024)
                                         print(f"Batch {len(batch_times)}: {avg_batch_time:.4f}s, "
                                               f"{throughput:.2f} MB/s, mem: {avg_mem_time*1000:.3f}ms, "
