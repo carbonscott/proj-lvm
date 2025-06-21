@@ -37,11 +37,14 @@ print_error() {
 
 validate_numa_node() {
     local numa_node=$1
+    local silent=${2:-false}
 
     # Test if we can bind to this NUMA node
     numactl --cpunodebind=$numa_node --membind=$numa_node true 2>/dev/null
     if [ $? -ne 0 ]; then
-        print_error "NUMA node $numa_node is not accessible for binding. Skipping."
+        if [ "$silent" != "true" ]; then
+            print_error "NUMA node $numa_node is not accessible for binding. Skipping." >&2
+        fi
         return 1
     fi
     return 0
@@ -56,9 +59,9 @@ get_available_numa_nodes() {
         max_node=4  # fallback
     fi
 
-    # Test each node
+    # Test each node (silent mode to avoid stdout pollution)
     for (( i=0; i<$max_node; i++ )); do
-        if validate_numa_node $i; then
+        if validate_numa_node $i true; then
             available_nodes+=($i)
         fi
     done
