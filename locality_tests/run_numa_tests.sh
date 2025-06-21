@@ -236,7 +236,6 @@ run_ipc_test() {
     echo ""
 }
 
-# Modified run_all_network_tests to use available nodes
 run_all_network_tests() {
     print_header "Running Network Socket Tests"
 
@@ -286,7 +285,6 @@ run_all_network_tests() {
     fi
 }
 
-# Modified run_all_ipc_tests to use available nodes
 run_all_ipc_tests() {
     print_header "Running IPC Socket Tests"
     echo "Testing cross-NUMA memory access performance"
