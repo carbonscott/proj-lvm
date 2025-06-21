@@ -14,7 +14,6 @@ import numpy as np
 import torch
 import os
 import psutil
-import json
 from pynng import Pull0, Timeout
 
 def get_numa_info():
@@ -122,7 +121,7 @@ def run_ipc_pull_test(
                 if newline_index != -1:
                     metadata_str = data[:newline_index].decode('utf-8')
                     try:
-                        metadata = json.loads(metadata_str)
+                        metadata = eval(metadata_str)
                         is_warmup = metadata.get('is_warmup', False)
                         sample_index = metadata.get('index', received_count)
                         tensor_shape = metadata.get('shape', (1, 224, 224))
