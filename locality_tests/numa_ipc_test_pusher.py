@@ -1,8 +1,4 @@
-def run_ipc_push_test(
-    ipc_path,
-    tensor_shape=(1, 224, 224),
-    num_samples=1000,
-    batch_buffer_#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 NUMA IPC Test - Data Pusher
 
