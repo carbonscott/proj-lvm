@@ -14,6 +14,7 @@ TENSOR_SHAPE="1 224 224"
 BATCH_BUFFER_SIZE=10
 MEMORY_SIZE_MB=100
 TIMEOUT_MS=10000
+PULLER_TIMEOUT_S=300
 
 # Colors for output
 RED='\033[0;31m'
@@ -145,7 +146,9 @@ run_network_test() {
 
     # Start puller with timeout
     echo "Starting puller on NUMA node $puller_numa..."
-    timeout 60 numactl --cpunodebind=$puller_numa --membind=$puller_numa \
+    echo "Using puller timeout: ${PULLER_TIMEOUT_S}s"
+
+    timeout $PULLER_TIMEOUT_S numactl --cpunodebind=$puller_numa --membind=$puller_numa \
         python3 numa_network_test_puller.py \
         --address "tcp://127.0.0.1:$NETWORK_PORT" \
         --expected-samples $NUM_SAMPLES \
@@ -215,7 +218,9 @@ run_ipc_test() {
 
     # Start puller with timeout for connection
     echo "Starting puller on NUMA node $puller_numa..."
-    timeout 60 numactl --cpunodebind=$puller_numa --membind=$puller_numa \
+    echo "Using puller timeout: ${PULLER_TIMEOUT_S}s"
+
+    timeout $PULLER_TIMEOUT_S numactl --cpunodebind=$puller_numa --membind=$puller_numa \
         python3 numa_ipc_test_puller.py \
         --ipc-path $IPC_PATH \
         --expected-samples $NUM_SAMPLES \
@@ -330,14 +335,15 @@ usage() {
     echo "  validate   Validate NUMA node accessibility only"
     echo ""
     echo "OPTIONS:"
-    echo "  -n SAMPLES         Number of samples per test (default: $NUM_SAMPLES)"
-    echo "  -p PORT            Network port (default: $NETWORK_PORT)"
-    echo "  -i PATH            IPC socket path (default: $IPC_PATH)"
-    echo "  -s \"C H W\"         Tensor shape (default: \"$TENSOR_SHAPE\")"
-    echo "  -b BUFFER_SIZE     Batch-buffer size (default: $BATCH_BUFFER_SIZE)"
-    echo "  -m MEMORY_MB       Memory pool size in MB (default: $MEMORY_SIZE_MB)"
-    echo "  -t TIMEOUT_MS      Socket timeout in ms (default: $TIMEOUT_MS)"
-    echo "  -h                 Show this help"
+    echo "  -n SAMPLES          Number of samples per test (default: $NUM_SAMPLES)"
+    echo "  -p PORT             Network port (default: $NETWORK_PORT)"
+    echo "  -i PATH             IPC socket path (default: $IPC_PATH)"
+    echo "  -s \"C H W\"          Tensor shape (default: \"$TENSOR_SHAPE\")"
+    echo "  -b BUFFER_SIZE      Batch-buffer size (default: $BATCH_BUFFER_SIZE)"
+    echo "  -m MEMORY_MB        Memory pool size in MB (default: $MEMORY_SIZE_MB)"
+    echo "  -t TIMEOUT_MS       Socket timeout in ms (default: $TIMEOUT_MS)"
+    echo "  -P Puller_TIMEOUT_S Puller process timeout in seconds (default: $PULLER_TIMEOUT_S)"
+    echo "  -h                  Show this help"
     echo ""
     echo "Examples:"
     echo "  $0                                    # Run all tests"
@@ -395,7 +401,7 @@ validate_numa_setup() {
 }
 
 # Parse command line arguments
-while getopts "n:p:i:s:b:m:t:h" opt; do
+while getopts "n:p:i:s:b:m:t:P:h" opt; do
     case $opt in
         n)
             NUM_SAMPLES=$OPTARG
@@ -417,6 +423,9 @@ while getopts "n:p:i:s:b:m:t:h" opt; do
             ;;
         t)
             TIMEOUT_MS=$OPTARG
+            ;;
+        P)
+            PULLER_TIMEOUT_S=$OPTARG
             ;;
         h)
             usage
