@@ -264,9 +264,9 @@ def run_ipc_pull_test(
         print("=" * 50)
 
 def main():
-    parser = argparse.ArgumentParser(description='NUMA Network Pull Test')
-    parser.add_argument('--address', default='tcp://127.0.0.1:5555',
-                        help='Network address to pull from')
+    parser = argparse.ArgumentParser(description='NUMA IPC Pull Test')
+    parser.add_argument('--ipc-path', default='/tmp/numa_ipc_test',
+                        help='IPC socket path')
     parser.add_argument('--expected-samples', type=int, default=1000,
                         help='Expected number of test samples')
     parser.add_argument('--timeout', type=int, default=10000,
@@ -275,20 +275,17 @@ def main():
                         help='Size for both batching and processing buffer')
     parser.add_argument('--memory-size-mb', type=int, default=100,
                         help='Size of memory pool in MB')
-    parser.add_argument('--nic-numa', type=int, default=None,
-                        help='NUMA node where the NIC is located')
     parser.add_argument('--no-process', action='store_true',
                         help='Skip tensor processing (just receive)')
 
     args = parser.parse_args()
 
-    run_network_pull_test(
-        args.address,
+    run_ipc_pull_test(
+        args.ipc_path,
         args.expected_samples,
         args.timeout,
         args.batch_buffer_size,
         args.memory_size_mb,
-        args.nic_numa,
         not args.no_process
     )
 
