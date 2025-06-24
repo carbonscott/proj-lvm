@@ -148,11 +148,11 @@ check_dependencies() {
         exit 1
     fi
 
-    # Check for vit-pytorch (required)
+    # Check for vit-pytorch (optional - only needed for depth > 0)
     python3 -c "import vit_pytorch" 2>/dev/null
     if [ $? -ne 0 ]; then
-        print_error "vit-pytorch not found. Please install with: pip install vit-pytorch"
-        exit 1
+        print_info "vit-pytorch not found. No-op mode (depth=0) will work, but ViT inference requires:"
+        echo "  pip install vit-pytorch"
     fi
 
     echo "All dependencies satisfied."
@@ -177,52 +177,6 @@ show_gpu_numa_topology() {
     done
 }
 
-run_gpu_h2d_d2h_test() {
-    local gpu_id=$1
-    local numa_node=$2
-    local test_name="GPU H2D/D2H Test: GPU${gpu_id} on NUMA${numa_node}"
-
-    print_test "$test_name"
-
-    # Validate NUMA node
-    if ! validate_numa_node $numa_node; then
-        echo "Skipping test due to NUMA node $numa_node not being accessible"
-        return 1
-    fi
-
-    # Clean up any existing processes
-    pkill -f "gpu_numa_h2d_d2h_test" 2>/dev/null
-    sleep 1
-
-    echo "Starting H2D/D2H test on GPU $gpu_id with NUMA node $numa_node..."
-
-    # Create nsys report directory if it doesn't exist
-    mkdir -p "$NSYS_REPORT_DIR"
-
-    local nsys_output="${NSYS_REPORT_DIR}/h2d_d2h_gpu${gpu_id}_numa${numa_node}"
-
-    timeout $TIMEOUT_S nsys profile -o "$nsys_output" --trace=cuda,nvtx \
-        numactl --cpunodebind=$numa_node --membind=$numa_node \
-        python3 gpu_numa_h2d_d2h_test.py \
-        --gpu-id $gpu_id \
-        --shape $TENSOR_SHAPE \
-        --num-samples $NUM_SAMPLES \
-        --batch-size $BATCH_SIZE \
-        --warmup-samples $WARMUP_SAMPLES \
-        --memory-size-mb $MEMORY_SIZE_MB
-
-    local exit_code=$?
-
-    if [ $exit_code -eq 0 ]; then
-        echo -e "${GREEN}$test_name completed successfully${NC}"
-        echo "NSYS report saved: ${nsys_output}.nsys-rep"
-    else
-        print_error "$test_name failed with exit code $exit_code"
-        return 1
-    fi
-    echo ""
-}
-
 run_gpu_pipeline_test() {
     local gpu_id=$1
     local numa_node=$2
@@ -231,7 +185,12 @@ run_gpu_pipeline_test() {
     local heads=$5
     local dim=$6
     local mlp_dim=$7
-    local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (ViT: ${patch_size}/${depth}/${heads}/${dim}/${mlp_dim})"
+
+    if [ $depth -eq 0 ]; then
+        local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (No-op: H2D/D2H only)"
+    else
+        local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (ViT: ${patch_size}/${depth}/${heads}/${dim}/${mlp_dim})"
+    fi
 
     print_test "$test_name"
 
@@ -250,7 +209,11 @@ run_gpu_pipeline_test() {
     # Create nsys report directory if it doesn't exist
     mkdir -p "$NSYS_REPORT_DIR"
 
-    local nsys_output="${NSYS_REPORT_DIR}/pipeline_gpu${gpu_id}_numa${numa_node}_vit${patch_size}x${depth}x${dim}"
+    if [ $depth -eq 0 ]; then
+        local nsys_output="${NSYS_REPORT_DIR}/h2d_d2h_gpu${gpu_id}_numa${numa_node}"
+    else
+        local nsys_output="${NSYS_REPORT_DIR}/pipeline_gpu${gpu_id}_numa${numa_node}_vit${patch_size}x${depth}x${dim}"
+    fi
 
     timeout $TIMEOUT_S nsys profile -o "$nsys_output" --trace=cuda,nvtx \
         numactl --cpunodebind=$numa_node --membind=$numa_node \
@@ -279,38 +242,6 @@ run_gpu_pipeline_test() {
     echo ""
 }
 
-run_all_h2d_d2h_tests() {
-    print_header "Running GPU H2D/D2H Tests"
-
-    # Get available NUMA nodes and GPUs
-    available_nodes=($(get_available_numa_nodes))
-    available_gpus=($(get_available_gpus))
-
-    echo "Available NUMA nodes: ${available_nodes[@]}"
-    echo "Available GPUs: ${available_gpus[@]}"
-    echo ""
-
-    if [ ${#available_nodes[@]} -lt 1 ]; then
-        print_error "Need at least 1 NUMA node for testing. Found: ${#available_nodes[@]}"
-        return 1
-    fi
-
-    if [ ${#available_gpus[@]} -lt 1 ]; then
-        print_error "Need at least 1 GPU for testing. Found: ${#available_gpus[@]}"
-        return 1
-    fi
-
-    # Test each GPU with each NUMA node
-    for gpu in "${available_gpus[@]}"; do
-        gpu_numa_affinity=$(get_gpu_numa_affinity $gpu)
-        print_info "GPU $gpu has NUMA affinity: $gpu_numa_affinity"
-
-        for numa_node in "${available_nodes[@]}"; do
-            run_gpu_h2d_d2h_test $gpu $numa_node
-        done
-    done
-}
-
 run_all_pipeline_tests() {
     print_header "Running GPU Pipeline Tests"
 
@@ -335,6 +266,7 @@ run_all_pipeline_tests() {
     # Different ViT configurations to test varying compute loads
     # Format: patch_size depth heads dim mlp_dim
     declare -a vit_configs=(
+        "32 0 8 256 1024"     # No-op: H2D/D2H only
         "32 4 8 256 1024"     # Light: Small model, fast compute
         "32 6 8 512 2048"     # Medium: Balanced model
         "16 8 12 768 3072"    # Heavy: Larger model, more compute
@@ -381,13 +313,9 @@ run_focused_tests() {
     echo "Testing GPU $gpu_id with NUMA nodes: ${test_nodes[@]}"
     echo ""
 
-    # Run H2D/D2H tests
-    for numa_node in "${test_nodes[@]}"; do
-        run_gpu_h2d_d2h_test $gpu_id $numa_node
-    done
-
     # Run pipeline tests with focused ViT configurations
     declare -a focused_vit_configs=(
+        "32 0 8 256 1024"     # No-op: H2D/D2H only
         "32 6 8 512 2048"     # Medium: Balanced
         "16 8 12 768 3072"    # Heavy: More compute-intensive
     )
@@ -453,8 +381,9 @@ validate_gpu_numa_setup() {
     echo ""
     echo "Recommended test configurations:"
     if [ ${#available_nodes[@]} -ge 1 ] && [ ${#available_gpus[@]} -ge 1 ]; then
-        echo "- H2D/D2H tests: Ready (${#available_gpus[@]} GPUs × ${#available_nodes[@]} NUMA nodes)"
-        echo "- Pipeline tests: Ready"
+        echo "- Pipeline tests: Ready (${#available_gpus[@]} GPUs × ${#available_nodes[@]} NUMA nodes)"
+        echo "  * No-op mode (depth=0): Pure H2D/D2H performance"
+        echo "  * ViT modes (depth>0): Compute + memory transfer pipeline"
 
         # Suggest interesting test cases
         echo ""
@@ -474,9 +403,7 @@ usage() {
     echo "Usage: $0 [OPTIONS] [TEST_TYPE]"
     echo ""
     echo "TEST_TYPE:"
-    echo "  h2d-d2h       Run H2D/D2H performance tests"
-    echo "  pipeline      Run pipeline tests with ViT double buffering"
-    echo "  all           Run all tests (default)"
+    echo "  pipeline      Run pipeline tests with ViT or no-op compute (default)"
     echo "  topology      Show GPU and NUMA topology only"
     echo "  validate      Validate GPU-NUMA setup only"
     echo "  focused GPU_ID [NUMA_NODES]  Run focused tests for specific GPU"
@@ -492,9 +419,8 @@ usage() {
     echo "  -h                  Show this help"
     echo ""
     echo "Examples:"
-    echo "  $0                              # Run all tests"
-    echo "  $0 h2d-d2h                      # Run H2D/D2H tests only"
-    echo "  $0 pipeline                     # Run pipeline tests only"
+    echo "  $0                              # Run all pipeline tests (including no-op)"
+    echo "  $0 pipeline                     # Run pipeline tests"
     echo "  $0 validate                     # Check GPU-NUMA setup"
     echo "  $0 focused 3                    # Run focused tests for GPU 3"
     echo "  $0 focused 3 0,2                # Test GPU 3 with NUMA nodes 0,2"
@@ -502,9 +428,10 @@ usage() {
     echo "  $0 -r my_reports pipeline       # Custom nsys output directory"
     echo ""
     echo "ViT Pipeline Configurations:"
-    echo "  Light compute:  patch_size=32, depth=4, dim=256   (memory transfer dominates)"
-    echo "  Medium compute: patch_size=32, depth=6, dim=512   (balanced)"
-    echo "  Heavy compute:  patch_size=16, depth=8, dim=768   (compute dominates)"
+    echo "  No-op compute:  patch_size=32, depth=0           (H2D/D2H only)"
+    echo "  Light compute:  patch_size=32, depth=4, dim=256  (memory transfer dominates)"
+    echo "  Medium compute: patch_size=32, depth=6, dim=512  (balanced)"
+    echo "  Heavy compute:  patch_size=16, depth=8, dim=768  (compute dominates)"
     echo "  Very Heavy:     patch_size=16, depth=12, dim=1024 (compute-bound)"
 }
 
@@ -545,7 +472,7 @@ while getopts "n:s:b:w:m:r:t:h" opt; do
 done
 
 shift $((OPTIND-1))
-TEST_TYPE=${1:-all}
+TEST_TYPE=${1:-pipeline}
 
 # Main execution
 check_dependencies
@@ -559,17 +486,8 @@ case $TEST_TYPE in
         echo ""
         validate_gpu_numa_setup
         ;;
-    h2d-d2h)
-        show_gpu_numa_topology
-        run_all_h2d_d2h_tests
-        ;;
     pipeline)
         show_gpu_numa_topology
-        run_all_pipeline_tests
-        ;;
-    all)
-        show_gpu_numa_topology
-        run_all_h2d_d2h_tests
         run_all_pipeline_tests
         ;;
     focused)

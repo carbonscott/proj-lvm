@@ -93,7 +93,7 @@ def get_gpu_info(gpu_id):
         return {'error': str(e)}
 
 def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id):
-    """Create ViT model for compute simulation"""
+    """Create ViT model for compute simulation, or None for no-op"""
     C, H, W = tensor_shape
 
     # Ensure image size is compatible with patch size
@@ -101,6 +101,12 @@ def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_i
     # Round up to nearest multiple of patch_size
     image_size = ((image_size + patch_size - 1) // patch_size) * patch_size
 
+    # Handle no-op case
+    if depth == 0:
+        print("No-op compute mode: depth=0, skipping ViT model creation")
+        return None, image_size
+
+    # Normal ViT creation
     vit_model = ViT(
         image_size=image_size,
         patch_size=patch_size,
@@ -138,15 +144,15 @@ class DoubleBufferedPipeline:
             'A': torch.cuda.Event(enable_timing=False),
             'B': torch.cuda.Event(enable_timing=False)
         }
-
         # Prime both events so wait_event() never deadlocks on first use
         for ev in self.d2h_done_event.values():
-            ev.record()   # record on default stream makes them signalled immediately
+            ev.record()  # Record on default stream makes them signaled immediately
 
-        # Create ViT model
+        # Create ViT model (or None for no-op)
         self.vit_model, self.image_size = create_vit_model(
             tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id
         )
+        self.is_noop = (self.vit_model is None)
 
         # Double buffers on GPU (with ViT-compatible size)
         C = tensor_shape[0]
@@ -196,7 +202,7 @@ class DoubleBufferedPipeline:
                         gpu_buffer[i].copy_(tensor, non_blocking=True)
 
     def compute_workload(self, batch_idx, current_batch_size, nvtx_prefix):
-        """Perform ViT compute workload on current buffer (only valid slice)"""
+        """Perform compute workload: ViT inference or no-op"""
         gpu_buffer = self.gpu_buffers[self.current]
 
         with torch.cuda.stream(self.compute_stream):
@@ -204,15 +210,21 @@ class DoubleBufferedPipeline:
                 # Wait for H2D to complete
                 self.compute_stream.wait_stream(self.h2d_stream)
 
-                # Process only the valid slice for variable-sized batches
-                valid_gpu_slice = gpu_buffer[:current_batch_size]
-
-                # Run ViT inference
-                with torch.no_grad():
-                    with nvtx.range(f"vit_forward_{batch_idx}"):
-                        predictions = self.vit_model(valid_gpu_slice)
-                        # Force compute completion with a small operation
-                        _ = predictions.sum()
+                if self.is_noop:
+                    # No-op compute: minimal operation for stream ordering
+                    with nvtx.range(f"noop_compute_{batch_idx}"):
+                        # Touch the data to ensure H2D completed and maintain stream dependencies
+                        valid_gpu_slice = gpu_buffer[:current_batch_size]
+                        _ = valid_gpu_slice.sum()  # Minimal compute operation
+                else:
+                    # Normal ViT inference
+                    valid_gpu_slice = gpu_buffer[:current_batch_size]
+                    # Run ViT inference
+                    with torch.no_grad():
+                        with nvtx.range(f"vit_forward_{batch_idx}"):
+                            predictions = self.vit_model(valid_gpu_slice)
+                            # Force compute completion with a small operation
+                            _ = predictions.sum()
 
     def d2h_transfer(self, batch_idx, current_batch_size, nvtx_prefix):
         """Perform D2H transfer from current buffer (only valid slice)"""
@@ -269,6 +281,9 @@ def run_pipeline_test(
 ):
     """
     Run comprehensive pipeline performance test with double buffering
+
+    When depth=0, runs in no-op mode testing only H2D/D2H performance.
+    When depth>0, runs full ViT inference pipeline.
     """
 
     # Set deterministic behavior if requested
@@ -300,6 +315,12 @@ def run_pipeline_test(
     print(f"Sync Frequency: {sync_frequency}")
     print(f"Deterministic: {deterministic}")
     print("=" * 60)
+
+    # Check vit-pytorch availability for non-no-op mode
+    if depth > 0 and not VIT_AVAILABLE:
+        print("ERROR: vit-pytorch not found and depth > 0. Install with: pip install vit-pytorch")
+        print("Or use --vit-depth 0 for no-op compute mode.")
+        sys.exit(1)
 
     # Check GPU availability
     if not torch.cuda.is_available():
