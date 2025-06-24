@@ -16,8 +16,8 @@ TENSOR_SHAPE="3 224 224"
 BATCH_SIZE=10
 WARMUP_SAMPLES=100
 MEMORY_SIZE_MB=512
-COMPUTE_ITERATIONS=100
 TIMEOUT_S=600
+NSYS_REPORT_DIR="nsys_reports"
 
 print_header() {
     echo -e "${GREEN}================================${NC}"
@@ -99,10 +99,10 @@ get_gpu_numa_affinity() {
     local gpu_id=$1
 
     # Try to get GPU NUMA affinity from nvidia-smi topo
-    local numa_affinity=$(nvidia-smi topo -m 2>/dev/null | grep "GPU${gpu_id}" | awk '{print $NF}' | head -1)
+    local numa_affinity=$(nvidia-smi topo -m 2>/dev/null | grep "^GPU${gpu_id}" | awk '{print $(NF-1)}' | head -1)
 
-    # If we couldn't parse it, return unknown
-    if [ -z "$numa_affinity" ] || [ "$numa_affinity" = "N/A" ]; then
+    # If we couldn't parse it or it's N/A, return unknown
+    if [ -z "$numa_affinity" ] || [ "$numa_affinity" = "N/A" ] || [ "$numa_affinity" = "GPU" ]; then
         echo "unknown"
     else
         echo "$numa_affinity"
@@ -126,6 +126,13 @@ check_dependencies() {
         exit 1
     fi
 
+    # Check if nsys is available
+    if ! command -v nsys &> /dev/null; then
+        print_error "nsys is not available. Please install NVIDIA Nsight Systems."
+        echo "Download from: https://developer.nvidia.com/nsight-systems"
+        exit 1
+    fi
+
     # Check if Python packages are available
     python3 -c "import torch, psutil, numpy" 2>/dev/null
     if [ $? -ne 0 ]; then
@@ -138,6 +145,13 @@ check_dependencies() {
     python3 -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'" 2>/dev/null
     if [ $? -ne 0 ]; then
         print_error "CUDA is not available in PyTorch."
+        exit 1
+    fi
+
+    # Check for vit-pytorch (required)
+    python3 -c "import vit_pytorch" 2>/dev/null
+    if [ $? -ne 0 ]; then
+        print_error "vit-pytorch not found. Please install with: pip install vit-pytorch"
         exit 1
     fi
 
@@ -182,20 +196,26 @@ run_gpu_h2d_d2h_test() {
 
     echo "Starting H2D/D2H test on GPU $gpu_id with NUMA node $numa_node..."
 
-    timeout $TIMEOUT_S numactl --cpunodebind=$numa_node --membind=$numa_node \
+    # Create nsys report directory if it doesn't exist
+    mkdir -p "$NSYS_REPORT_DIR"
+
+    local nsys_output="${NSYS_REPORT_DIR}/h2d_d2h_gpu${gpu_id}_numa${numa_node}"
+
+    timeout $TIMEOUT_S nsys profile -o "$nsys_output" --trace=cuda,nvtx \
+        numactl --cpunodebind=$numa_node --membind=$numa_node \
         python3 gpu_numa_h2d_d2h_test.py \
         --gpu-id $gpu_id \
         --shape $TENSOR_SHAPE \
         --num-samples $NUM_SAMPLES \
         --batch-size $BATCH_SIZE \
         --warmup-samples $WARMUP_SAMPLES \
-        --memory-size-mb $MEMORY_SIZE_MB \
-        --nsys-report "h2d_d2h_gpu${gpu_id}_numa${numa_node}.nsys-rep"
+        --memory-size-mb $MEMORY_SIZE_MB
 
     local exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}$test_name completed successfully${NC}"
+        echo "NSYS report saved: ${nsys_output}.nsys-rep"
     else
         print_error "$test_name failed with exit code $exit_code"
         return 1
@@ -206,8 +226,12 @@ run_gpu_h2d_d2h_test() {
 run_gpu_pipeline_test() {
     local gpu_id=$1
     local numa_node=$2
-    local compute_iter=$3
-    local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (${compute_iter} iters)"
+    local patch_size=$3
+    local depth=$4
+    local heads=$5
+    local dim=$6
+    local mlp_dim=$7
+    local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (ViT: ${patch_size}/${depth}/${heads}/${dim}/${mlp_dim})"
 
     print_test "$test_name"
 
@@ -223,7 +247,13 @@ run_gpu_pipeline_test() {
 
     echo "Starting pipeline test on GPU $gpu_id with NUMA node $numa_node..."
 
-    timeout $TIMEOUT_S numactl --cpunodebind=$numa_node --membind=$numa_node \
+    # Create nsys report directory if it doesn't exist
+    mkdir -p "$NSYS_REPORT_DIR"
+
+    local nsys_output="${NSYS_REPORT_DIR}/pipeline_gpu${gpu_id}_numa${numa_node}_vit${patch_size}x${depth}x${dim}"
+
+    timeout $TIMEOUT_S nsys profile -o "$nsys_output" --trace=cuda,nvtx \
+        numactl --cpunodebind=$numa_node --membind=$numa_node \
         python3 gpu_numa_pipeline_test.py \
         --gpu-id $gpu_id \
         --shape $TENSOR_SHAPE \
@@ -231,13 +261,17 @@ run_gpu_pipeline_test() {
         --batch-size $BATCH_SIZE \
         --warmup-samples $WARMUP_SAMPLES \
         --memory-size-mb $MEMORY_SIZE_MB \
-        --compute-iterations $compute_iter \
-        --nsys-report "pipeline_gpu${gpu_id}_numa${numa_node}_iter${compute_iter}.nsys-rep"
+        --vit-patch-size $patch_size \
+        --vit-depth $depth \
+        --vit-heads $heads \
+        --vit-dim $dim \
+        --vit-mlp-dim $mlp_dim
 
     local exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}$test_name completed successfully${NC}"
+        echo "NSYS report saved: ${nsys_output}.nsys-rep"
     else
         print_error "$test_name failed with exit code $exit_code"
         return 1
@@ -298,17 +332,31 @@ run_all_pipeline_tests() {
         return 1
     fi
 
-    # Different compute iteration counts to test overlap scenarios
-    compute_iterations=(50 100 200 500)
+    # Different ViT configurations to test varying compute loads
+    # Format: patch_size depth heads dim mlp_dim
+    declare -a vit_configs=(
+        "32 4 8 256 1024"     # Light: Small model, fast compute
+        "32 6 8 512 2048"     # Medium: Balanced model
+        "16 8 12 768 3072"    # Heavy: Larger model, more compute
+        "16 12 16 1024 4096"  # Very Heavy: Large model for compute-bound tests
+    )
 
-    # Test each GPU with each NUMA node and compute iteration count
+    # Test each GPU with each NUMA node and ViT configuration
     for gpu in "${available_gpus[@]}"; do
         gpu_numa_affinity=$(get_gpu_numa_affinity $gpu)
         print_info "GPU $gpu has NUMA affinity: $gpu_numa_affinity"
 
         for numa_node in "${available_nodes[@]}"; do
-            for compute_iter in "${compute_iterations[@]}"; do
-                run_gpu_pipeline_test $gpu $numa_node $compute_iter
+            for vit_config in "${vit_configs[@]}"; do
+                # Parse ViT config
+                read -ra VIT_PARAMS <<< "$vit_config"
+                local patch_size=${VIT_PARAMS[0]}
+                local depth=${VIT_PARAMS[1]}
+                local heads=${VIT_PARAMS[2]}
+                local dim=${VIT_PARAMS[3]}
+                local mlp_dim=${VIT_PARAMS[4]}
+
+                run_gpu_pipeline_test $gpu $numa_node $patch_size $depth $heads $dim $mlp_dim
             done
         done
     done
@@ -338,11 +386,23 @@ run_focused_tests() {
         run_gpu_h2d_d2h_test $gpu_id $numa_node
     done
 
-    # Run pipeline tests with different compute loads
-    compute_iterations=(100 500)
+    # Run pipeline tests with focused ViT configurations
+    declare -a focused_vit_configs=(
+        "32 6 8 512 2048"     # Medium: Balanced
+        "16 8 12 768 3072"    # Heavy: More compute-intensive
+    )
+
     for numa_node in "${test_nodes[@]}"; do
-        for compute_iter in "${compute_iterations[@]}"; do
-            run_gpu_pipeline_test $gpu_id $numa_node $compute_iter
+        for vit_config in "${focused_vit_configs[@]}"; do
+            # Parse ViT config
+            read -ra VIT_PARAMS <<< "$vit_config"
+            local patch_size=${VIT_PARAMS[0]}
+            local depth=${VIT_PARAMS[1]}
+            local heads=${VIT_PARAMS[2]}
+            local dim=${VIT_PARAMS[3]}
+            local mlp_dim=${VIT_PARAMS[4]}
+
+            run_gpu_pipeline_test $gpu_id $numa_node $patch_size $depth $heads $dim $mlp_dim
         done
     done
 }
@@ -415,7 +475,7 @@ usage() {
     echo ""
     echo "TEST_TYPE:"
     echo "  h2d-d2h       Run H2D/D2H performance tests"
-    echo "  pipeline      Run pipeline tests with double buffering"
+    echo "  pipeline      Run pipeline tests with ViT double buffering"
     echo "  all           Run all tests (default)"
     echo "  topology      Show GPU and NUMA topology only"
     echo "  validate      Validate GPU-NUMA setup only"
@@ -427,7 +487,7 @@ usage() {
     echo "  -b BATCH_SIZE       Batch size (default: $BATCH_SIZE)"
     echo "  -w WARMUP           Warmup samples (default: $WARMUP_SAMPLES)"
     echo "  -m MEMORY_MB        Memory pool size in MB (default: $MEMORY_SIZE_MB)"
-    echo "  -c COMPUTE_ITERS    Compute iterations (default: $COMPUTE_ITERATIONS)"
+    echo "  -r NSYS_DIR         NSYS reports directory (default: $NSYS_REPORT_DIR)"
     echo "  -t TIMEOUT_S        Test timeout in seconds (default: $TIMEOUT_S)"
     echo "  -h                  Show this help"
     echo ""
@@ -438,11 +498,18 @@ usage() {
     echo "  $0 validate                     # Check GPU-NUMA setup"
     echo "  $0 focused 3                    # Run focused tests for GPU 3"
     echo "  $0 focused 3 0,2                # Test GPU 3 with NUMA nodes 0,2"
-    echo "  $0 -n 2000 -c 200 pipeline     # Custom parameters"
+    echo "  $0 -n 2000 pipeline            # Custom parameters"
+    echo "  $0 -r my_reports pipeline       # Custom nsys output directory"
+    echo ""
+    echo "ViT Pipeline Configurations:"
+    echo "  Light compute:  patch_size=32, depth=4, dim=256   (memory transfer dominates)"
+    echo "  Medium compute: patch_size=32, depth=6, dim=512   (balanced)"
+    echo "  Heavy compute:  patch_size=16, depth=8, dim=768   (compute dominates)"
+    echo "  Very Heavy:     patch_size=16, depth=12, dim=1024 (compute-bound)"
 }
 
 # Parse command line arguments
-while getopts "n:s:b:w:m:c:t:h" opt; do
+while getopts "n:s:b:w:m:r:t:h" opt; do
     case $opt in
         n)
             NUM_SAMPLES=$OPTARG
@@ -459,8 +526,8 @@ while getopts "n:s:b:w:m:c:t:h" opt; do
         m)
             MEMORY_SIZE_MB=$OPTARG
             ;;
-        c)
-            COMPUTE_ITERATIONS=$OPTARG
+        r)
+            NSYS_REPORT_DIR=$OPTARG
             ;;
         t)
             TIMEOUT_S=$OPTARG
@@ -526,6 +593,7 @@ esac
 print_header "Tests Completed"
 echo "Review the results above to understand GPU-NUMA effects on your system."
 echo ""
+echo "NSYS reports saved in: $NSYS_REPORT_DIR/"
 echo "For detailed analysis, use nsys to profile the generated .nsys-rep files:"
-echo "  nsys stats *.nsys-rep"
-echo "  nsys-ui *.nsys-rep  # For GUI analysis"
+echo "  nsys stats $NSYS_REPORT_DIR/*.nsys-rep"
+echo "  nsys-ui $NSYS_REPORT_DIR/*.nsys-rep  # For GUI analysis"

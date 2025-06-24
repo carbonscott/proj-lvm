@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GPU NUMA Pipeline Test with Double Buffering
+GPU NUMA Pipeline Test with ViT and Double Buffering
 
 Test script to evaluate end-to-end pipeline performance with overlapping
 H2D, Compute, and D2H stages using double buffering across NUMA nodes.
@@ -18,14 +18,15 @@ import numpy as np
 import os
 import psutil
 import sys
-import threading
 from collections import defaultdict
-from enum import Enum
 
-class PipelineStage(Enum):
-    H2D = "h2d"
-    COMPUTE = "compute"
-    D2H = "d2h"
+# Check for vit-pytorch availability
+try:
+    from vit_pytorch import ViT
+    VIT_AVAILABLE = True
+except ImportError:
+    print("ERROR: vit-pytorch not found. Please install with: pip install vit-pytorch")
+    sys.exit(1)
 
 def get_numa_info():
     """Get current process NUMA binding info"""
@@ -92,32 +93,40 @@ def get_gpu_info(gpu_id):
     except Exception as e:
         return {'error': str(e)}
 
-def create_matmul_workload(batch_size, tensor_shape, compute_iterations, gpu_id):
-    """Create matmul workload tensors for compute simulation"""
+def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id):
+    """Create ViT model for compute simulation"""
     C, H, W = tensor_shape
 
-    # Create matrices for matmul that will simulate NN workload
-    # Flatten spatial dimensions and create weight matrix
-    input_features = H * W
-    hidden_features = max(512, input_features // 4)  # Reasonable hidden size
+    # Ensure image size is compatible with patch size
+    image_size = max(H, W)
+    # Round up to nearest multiple of patch_size
+    image_size = ((image_size + patch_size - 1) // patch_size) * patch_size
 
-    # Weight matrices for multiple layers
-    weights = []
-    for i in range(max(1, compute_iterations // 50)):  # Multiple layers based on iterations
-        weight = torch.randn(input_features if i == 0 else hidden_features, 
-                           hidden_features, device=f'cuda:{gpu_id}')
-        weights.append(weight)
+    vit_model = ViT(
+        image_size=image_size,
+        patch_size=patch_size,
+        num_classes=1000,  # Standard ImageNet classes
+        dim=dim,
+        depth=depth,
+        heads=heads,
+        mlp_dim=mlp_dim,
+        channels=C,
+        dropout=0.0,  # No dropout for consistent timing
+        emb_dropout=0.0
+    ).to(f'cuda:{gpu_id}')
 
-    return weights, input_features, hidden_features
+    # Set to eval mode for consistent inference timing
+    vit_model.eval()
+
+    return vit_model, image_size
 
 class DoubleBufferedPipeline:
-    """Double buffered pipeline for H2D -> Compute -> D2H"""
+    """Double buffered pipeline for H2D -> ViT Compute -> D2H"""
 
-    def __init__(self, batch_size, tensor_shape, gpu_id, compute_iterations, pin_memory=True):
+    def __init__(self, batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory=True):
         self.batch_size = batch_size
         self.tensor_shape = tensor_shape
         self.gpu_id = gpu_id
-        self.compute_iterations = compute_iterations
         self.pin_memory = pin_memory
 
         # Create CUDA streams for pipeline stages
@@ -125,11 +134,17 @@ class DoubleBufferedPipeline:
         self.compute_stream = torch.cuda.Stream(device=gpu_id)
         self.d2h_stream = torch.cuda.Stream(device=gpu_id)
 
-        # Double buffers on GPU
-        self.gpu_buffer_a = torch.zeros(batch_size, *tensor_shape, device=f'cuda:{gpu_id}')
-        self.gpu_buffer_b = torch.zeros(batch_size, *tensor_shape, device=f'cuda:{gpu_id}')
+        # Create ViT model
+        self.vit_model, self.image_size = create_vit_model(
+            tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id
+        )
 
-        # CPU result buffers
+        # Double buffers on GPU (with ViT-compatible size)
+        C = tensor_shape[0]
+        self.gpu_buffer_a = torch.zeros(batch_size, C, self.image_size, self.image_size, device=f'cuda:{gpu_id}')
+        self.gpu_buffer_b = torch.zeros(batch_size, C, self.image_size, self.image_size, device=f'cuda:{gpu_id}')
+
+        # CPU result buffers (original tensor shape)
         self.cpu_result_buffer_a = [torch.zeros(*tensor_shape) for _ in range(batch_size)]
         self.cpu_result_buffer_b = [torch.zeros(*tensor_shape) for _ in range(batch_size)]
 
@@ -138,14 +153,8 @@ class DoubleBufferedPipeline:
                 self.cpu_result_buffer_a[i] = self.cpu_result_buffer_a[i].pin_memory()
                 self.cpu_result_buffer_b[i] = self.cpu_result_buffer_b[i].pin_memory()
 
-        # Create matmul workload
-        self.weights, self.input_features, self.hidden_features = create_matmul_workload(
-            batch_size, tensor_shape, compute_iterations, gpu_id
-        )
-
         # Pipeline state
         self.current_buffer = 'A'  # 'A' or 'B'
-        self.batch_results = []
 
     def get_current_buffers(self):
         """Get current GPU and CPU buffers"""
@@ -153,13 +162,6 @@ class DoubleBufferedPipeline:
             return self.gpu_buffer_a, self.cpu_result_buffer_a
         else:
             return self.gpu_buffer_b, self.cpu_result_buffer_b
-
-    def get_next_buffers(self):
-        """Get next GPU and CPU buffers"""
-        if self.current_buffer == 'A':
-            return self.gpu_buffer_b, self.cpu_result_buffer_b
-        else:
-            return self.gpu_buffer_a, self.cpu_result_buffer_a
 
     def swap_buffers(self):
         """Swap current buffer"""
@@ -173,10 +175,20 @@ class DoubleBufferedPipeline:
             with nvtx.range(f"{nvtx_prefix}_h2d_batch_{batch_idx}"):
                 for i, tensor in enumerate(cpu_batch):
                     with nvtx.range(f"h2d_tensor_{i}"):
-                        gpu_buffer[i].copy_(tensor, non_blocking=True)
+                        # Resize tensor to ViT-compatible size if needed
+                        if tensor.shape[-2:] != (self.image_size, self.image_size):
+                            resized_tensor = torch.nn.functional.interpolate(
+                                tensor.unsqueeze(0),
+                                size=(self.image_size, self.image_size),
+                                mode='bilinear',
+                                align_corners=False
+                            ).squeeze(0)
+                            gpu_buffer[i].copy_(resized_tensor, non_blocking=True)
+                        else:
+                            gpu_buffer[i].copy_(tensor, non_blocking=True)
 
     def compute_workload(self, batch_idx, nvtx_prefix):
-        """Perform compute workload on current buffer"""
+        """Perform ViT compute workload on current buffer"""
         gpu_buffer, _ = self.get_current_buffers()
 
         with torch.cuda.stream(self.compute_stream):
@@ -184,27 +196,12 @@ class DoubleBufferedPipeline:
                 # Wait for H2D to complete
                 self.compute_stream.wait_stream(self.h2d_stream)
 
-                # Flatten tensors for matmul
-                batch_flattened = gpu_buffer.view(self.batch_size, -1)
-
-                # Multiple matmul operations to simulate NN compute
-                x = batch_flattened
-                for iteration in range(self.compute_iterations):
-                    with nvtx.range(f"matmul_iter_{iteration}"):
-                        weight_idx = min(iteration // 50, len(self.weights) - 1)
-                        x = torch.matmul(x, self.weights[weight_idx])
-                        if iteration % 10 == 0:  # Add some nonlinearity occasionally
-                            x = torch.relu(x)
-
-                # Reshape back to original tensor shape (truncate if needed)
-                if x.shape[1] >= self.tensor_shape[0] * self.tensor_shape[1] * self.tensor_shape[2]:
-                    result = x[:, :self.tensor_shape[0] * self.tensor_shape[1] * self.tensor_shape[2]]
-                    gpu_buffer.copy_(result.view(self.batch_size, *self.tensor_shape))
-                else:
-                    # Pad if compute result is smaller
-                    padded = torch.zeros_like(batch_flattened)
-                    padded[:, :x.shape[1]] = x
-                    gpu_buffer.copy_(padded.view(self.batch_size, *self.tensor_shape))
+                # Run ViT inference
+                with torch.no_grad():
+                    with nvtx.range(f"vit_forward_{batch_idx}"):
+                        predictions = self.vit_model(gpu_buffer)
+                        # Force compute completion with a small operation
+                        _ = predictions.sum()
 
     def d2h_transfer(self, batch_idx, nvtx_prefix):
         """Perform D2H transfer from current buffer"""
@@ -217,19 +214,23 @@ class DoubleBufferedPipeline:
 
                 for i in range(len(cpu_result_buffer)):
                     with nvtx.range(f"d2h_tensor_{i}"):
-                        cpu_result_buffer[i].copy_(gpu_buffer[i], non_blocking=True)
+                        # Resize back to original shape if needed
+                        if gpu_buffer[i].shape[-2:] != self.tensor_shape[-2:]:
+                            resized_tensor = torch.nn.functional.interpolate(
+                                gpu_buffer[i].unsqueeze(0),
+                                size=self.tensor_shape[-2:],
+                                mode='bilinear',
+                                align_corners=False
+                            ).squeeze(0)
+                            cpu_result_buffer[i].copy_(resized_tensor, non_blocking=True)
+                        else:
+                            cpu_result_buffer[i].copy_(gpu_buffer[i], non_blocking=True)
 
-    def wait_for_completion(self, stages=None):
-        """Wait for specified pipeline stages to complete"""
-        if stages is None:
-            stages = [PipelineStage.H2D, PipelineStage.COMPUTE, PipelineStage.D2H]
-
-        if PipelineStage.H2D in stages:
-            self.h2d_stream.synchronize()
-        if PipelineStage.COMPUTE in stages:
-            self.compute_stream.synchronize()
-        if PipelineStage.D2H in stages:
-            self.d2h_stream.synchronize()
+    def wait_for_completion(self):
+        """Wait for all pipeline stages to complete"""
+        self.h2d_stream.synchronize()
+        self.compute_stream.synchronize()
+        self.d2h_stream.synchronize()
 
 def run_pipeline_test(
     gpu_id=0,
@@ -238,33 +239,19 @@ def run_pipeline_test(
     batch_size=10,
     warmup_samples=100,
     memory_size_mb=512,
-    compute_iterations=100,
+    patch_size=32,
+    depth=6,
+    heads=8,
+    dim=512,
+    mlp_dim=2048,
     skip_warmup=False,
     deterministic=False,
-    nsys_report=None,
     pin_memory=True,
     fill_pattern='random',
-    pipeline_modes=None,
     sync_frequency=10
 ):
     """
     Run comprehensive pipeline performance test with double buffering
-
-    Args:
-        gpu_id: GPU device ID
-        tensor_shape: Tensor shape as (C, H, W)
-        num_samples: Number of samples to test
-        batch_size: Batch size for pipeline
-        warmup_samples: Number of warmup samples
-        memory_size_mb: CPU memory pool size in MB
-        compute_iterations: Number of compute iterations per batch
-        skip_warmup: Skip warmup phase
-        deterministic: Enable deterministic algorithms
-        nsys_report: NSYS report name for automation
-        pin_memory: Use pinned memory for transfers
-        fill_pattern: Memory fill pattern
-        pipeline_modes: List of pipeline modes to test
-        sync_frequency: How often to synchronize for timing measurements
     """
 
     # Set deterministic behavior if requested
@@ -273,10 +260,6 @@ def run_pipeline_test(
         torch.backends.cudnn.benchmark = False
         torch.manual_seed(42)
         np.random.seed(42)
-
-    # Default pipeline modes
-    if pipeline_modes is None:
-        pipeline_modes = ['sequential', 'overlapped_simple', 'overlapped_double_buffer']
 
     numa_info = get_numa_info()
     gpu_info = get_gpu_info(gpu_id)
@@ -295,13 +278,10 @@ def run_pipeline_test(
     print(f"Total Samples: {num_samples}")
     print(f"Warmup Samples: {warmup_samples if not skip_warmup else 0}")
     print(f"CPU Memory Pool: {memory_size_mb} MB ({fill_pattern})")
-    print(f"Compute Iterations: {compute_iterations}")
+    print(f"ViT Config: patch_size={patch_size}, depth={depth}, heads={heads}, dim={dim}, mlp_dim={mlp_dim}")
     print(f"Pin Memory: {pin_memory}")
-    print(f"Pipeline Modes: {pipeline_modes}")
     print(f"Sync Frequency: {sync_frequency}")
     print(f"Deterministic: {deterministic}")
-    if nsys_report:
-        print(f"NSYS Report: {nsys_report}")
     print("=" * 60)
 
     # Check GPU availability
@@ -346,185 +326,36 @@ def run_pipeline_test(
 
     print(f"Generated {len(cpu_tensors)} CPU tensors")
 
-    # Results storage
-    results = defaultdict(list)
-
-    # Run tests for each pipeline mode
-    for pipeline_mode in pipeline_modes:
-        print(f"\n--- Running {pipeline_mode.upper()} Pipeline Test ---")
-
-        if not skip_warmup and warmup_samples > 0:
-            print(f"Warmup phase: {warmup_samples} samples...")
-            _run_pipeline_mode(
-                pipeline_mode, cpu_tensors[:warmup_samples], batch_size, gpu_id,
-                compute_iterations, f"warmup_{pipeline_mode}", pin_memory, sync_frequency,
-                is_warmup=True
-            )
-
-        print(f"Test phase: {num_samples} samples...")
-        start_idx = 0 if skip_warmup else warmup_samples
-        test_tensors = cpu_tensors[start_idx:start_idx + num_samples]
-
-        test_results = _run_pipeline_mode(
-            pipeline_mode, test_tensors, batch_size, gpu_id,
-            compute_iterations, f"test_{pipeline_mode}", pin_memory, sync_frequency,
-            is_warmup=False
-        )
-
-        results[pipeline_mode] = test_results
-
-    # Print results summary
-    _print_pipeline_results_summary(results, pipeline_modes)
-
-    print("\n=== Pipeline Test Completed ===")
-    if nsys_report:
-        print(f"Run nsys analysis: nsys stats {nsys_report}")
-
-def _run_pipeline_mode(pipeline_mode, tensors, batch_size, gpu_id, compute_iterations, 
-                      nvtx_prefix, pin_memory, sync_frequency, is_warmup=False):
-    """Run a specific pipeline mode"""
-    results = []
-    num_batches = (len(tensors) + batch_size - 1) // batch_size
-
-    if pipeline_mode == 'sequential':
-        results = _run_sequential_pipeline(
-            tensors, batch_size, gpu_id, compute_iterations, nvtx_prefix, sync_frequency, is_warmup
-        )
-    elif pipeline_mode == 'overlapped_simple':
-        results = _run_overlapped_simple_pipeline(
-            tensors, batch_size, gpu_id, compute_iterations, nvtx_prefix, sync_frequency, is_warmup
-        )
-    elif pipeline_mode == 'overlapped_double_buffer':
-        results = _run_overlapped_double_buffer_pipeline(
-            tensors, batch_size, gpu_id, compute_iterations, nvtx_prefix, pin_memory, sync_frequency, is_warmup
-        )
-
-    return results
-
-def _run_sequential_pipeline(tensors, batch_size, gpu_id, compute_iterations, nvtx_prefix, sync_frequency, is_warmup):
-    """Run sequential pipeline: H2D -> Compute -> D2H for each batch"""
-    results = []
-
-    # Pre-allocate GPU memory
-    gpu_batch = torch.zeros(batch_size, *tensors[0].shape, device=f'cuda:{gpu_id}')
-    cpu_result_batch = [torch.zeros(*tensors[0].shape) for _ in range(batch_size)]
-
-    # Create compute workload
-    weights, input_features, hidden_features = create_matmul_workload(
-        batch_size, tensors[0].shape, compute_iterations, gpu_id
+    # Create pipeline
+    pipeline = DoubleBufferedPipeline(
+        batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory
     )
 
-    with nvtx.range(f"{nvtx_prefix}_sequential"):
-        for batch_idx in range(0, len(tensors), batch_size):
-            batch_end = min(batch_idx + batch_size, len(tensors))
-            current_batch_size = batch_end - batch_idx
-            batch_tensors = tensors[batch_idx:batch_end]
+    # Warmup phase
+    if not skip_warmup and warmup_samples > 0:
+        print(f"Warmup phase: {warmup_samples} samples...")
+        _run_double_buffer_pipeline(
+            pipeline, cpu_tensors[:warmup_samples], batch_size, "warmup", sync_frequency, is_warmup=True
+        )
 
-            with nvtx.range(f"{nvtx_prefix}_batch_{batch_idx // batch_size}"):
-                start_time = time.time()
+    # Main test phase
+    print(f"Test phase: {num_samples} samples...")
+    start_idx = 0 if skip_warmup else warmup_samples
+    test_tensors = cpu_tensors[start_idx:start_idx + num_samples]
 
-                # H2D Transfer
-                with nvtx.range(f"h2d_seq_{batch_idx // batch_size}"):
-                    for i, tensor in enumerate(batch_tensors):
-                        gpu_batch[i].copy_(tensor, non_blocking=True)
-                    torch.cuda.synchronize()
+    results = _run_double_buffer_pipeline(
+        pipeline, test_tensors, batch_size, "test", sync_frequency, is_warmup=False
+    )
 
-                h2d_time = time.time()
+    # Print results summary
+    _print_results_summary(results)
 
-                # Compute
-                with nvtx.range(f"compute_seq_{batch_idx // batch_size}"):
-                    batch_flattened = gpu_batch[:current_batch_size].view(current_batch_size, -1)
-                    x = batch_flattened
-                    for iteration in range(compute_iterations):
-                        weight_idx = min(iteration // 50, len(weights) - 1)
-                        x = torch.matmul(x, weights[weight_idx])
-                        if iteration % 10 == 0:
-                            x = torch.relu(x)
+    print("\n=== Pipeline Test Completed ===")
+    print("Use nsys GUI or stats to analyze the detailed profiling data.")
 
-                    # Reshape back
-                    if x.shape[1] >= np.prod(tensors[0].shape):
-                        result = x[:, :np.prod(tensors[0].shape)]
-                        gpu_batch[:current_batch_size].copy_(result.view(current_batch_size, *tensors[0].shape))
-
-                    torch.cuda.synchronize()
-
-                compute_time = time.time()
-
-                # D2H Transfer
-                with nvtx.range(f"d2h_seq_{batch_idx // batch_size}"):
-                    for i in range(current_batch_size):
-                        cpu_result_batch[i].copy_(gpu_batch[i], non_blocking=True)
-                    torch.cuda.synchronize()
-
-                end_time = time.time()
-
-                if not is_warmup:
-                    results.append({
-                        'mode': 'sequential',
-                        'batch_idx': batch_idx // batch_size,
-                        'batch_size': current_batch_size,
-                        'total_duration': end_time - start_time,
-                        'h2d_duration': h2d_time - start_time,
-                        'compute_duration': compute_time - h2d_time,
-                        'd2h_duration': end_time - compute_time
-                    })
-
-                # Progress reporting
-                if ((batch_idx // batch_size) + 1) % sync_frequency == 0:
-                    progress = batch_end / len(tensors) * 100
-                    print(f"  Progress: {progress:.1f}% ({batch_end}/{len(tensors)})")
-
-    return results
-
-def _run_overlapped_simple_pipeline(tensors, batch_size, gpu_id, compute_iterations, nvtx_prefix, sync_frequency, is_warmup):
-    """Run overlapped pipeline with separate streams"""
-    results = []
-
-    # Create pipeline
-    pipeline = DoubleBufferedPipeline(batch_size, tensors[0].shape, gpu_id, compute_iterations)
-
-    with nvtx.range(f"{nvtx_prefix}_overlapped_simple"):
-        for batch_idx in range(0, len(tensors), batch_size):
-            batch_end = min(batch_idx + batch_size, len(tensors))
-            current_batch_size = batch_end - batch_idx
-            batch_tensors = tensors[batch_idx:batch_end]
-            batch_num = batch_idx // batch_size
-
-            with nvtx.range(f"{nvtx_prefix}_batch_{batch_num}"):
-                start_time = time.time()
-
-                # Launch all stages with stream dependencies
-                pipeline.h2d_transfer(batch_tensors, batch_num, nvtx_prefix)
-                pipeline.compute_workload(batch_num, nvtx_prefix)
-                pipeline.d2h_transfer(batch_num, nvtx_prefix)
-
-                # Wait for pipeline completion
-                pipeline.wait_for_completion()
-
-                end_time = time.time()
-
-                if not is_warmup:
-                    results.append({
-                        'mode': 'overlapped_simple',
-                        'batch_idx': batch_num,
-                        'batch_size': current_batch_size,
-                        'total_duration': end_time - start_time
-                    })
-
-                # Progress reporting
-                if (batch_num + 1) % sync_frequency == 0:
-                    progress = batch_end / len(tensors) * 100
-                    print(f"  Progress: {progress:.1f}% ({batch_end}/{len(tensors)})")
-
-    return results
-
-def _run_overlapped_double_buffer_pipeline(tensors, batch_size, gpu_id, compute_iterations, 
-                                          nvtx_prefix, pin_memory, sync_frequency, is_warmup):
+def _run_double_buffer_pipeline(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency, is_warmup):
     """Run fully overlapped double buffered pipeline"""
     results = []
-
-    # Create pipeline
-    pipeline = DoubleBufferedPipeline(batch_size, tensors[0].shape, gpu_id, compute_iterations, pin_memory)
 
     with nvtx.range(f"{nvtx_prefix}_double_buffer"):
         num_batches = (len(tensors) + batch_size - 1) // batch_size
@@ -551,8 +382,7 @@ def _run_overlapped_double_buffer_pipeline(tensors, batch_size, gpu_id, compute_
                     # Start H2D for current batch (in new buffer)
                     pipeline.h2d_transfer(batch_tensors, batch_idx, nvtx_prefix)
 
-                    # Wait for previous batch D2H to complete and record results
-                    prev_batch_idx = batch_idx - 1
+                    # Wait for previous batch D2H to complete
                     pipeline.d2h_stream.synchronize()
 
                     # Start compute for current batch
@@ -569,7 +399,6 @@ def _run_overlapped_double_buffer_pipeline(tensors, batch_size, gpu_id, compute_
 
                 if not is_warmup and batch_idx > 0:  # Skip first batch timing (no overlap yet)
                     results.append({
-                        'mode': 'overlapped_double_buffer',
                         'batch_idx': batch_idx,
                         'batch_size': current_batch_size,
                         'total_duration': end_time - start_time
@@ -582,42 +411,31 @@ def _run_overlapped_double_buffer_pipeline(tensors, batch_size, gpu_id, compute_
 
     return results
 
-def _print_pipeline_results_summary(results, pipeline_modes):
+def _print_results_summary(results):
     """Print comprehensive pipeline results summary"""
     print("\n=== Pipeline Results Summary ===")
 
-    for mode in pipeline_modes:
-        if mode not in results or not results[mode]:
-            continue
+    if not results:
+        print("No results to summarize")
+        return
 
-        mode_results = results[mode]
-        total_durations = [r['total_duration'] for r in mode_results]
+    total_durations = [r['total_duration'] for r in results]
 
-        print(f"\n{mode.upper()} Pipeline Statistics:")
-        print(f"  Batches: {len(mode_results)}")
-        print(f"  Total Duration (s): mean={np.mean(total_durations):.6f}, std={np.std(total_durations):.6f}")
-        print(f"  Total Duration (s): min={np.min(total_durations):.6f}, max={np.max(total_durations):.6f}")
+    print(f"Double Buffered Pipeline Statistics:")
+    print(f"  Batches: {len(results)}")
+    print(f"  Total Duration (s): mean={np.mean(total_durations):.6f}, std={np.std(total_durations):.6f}")
+    print(f"  Total Duration (s): min={np.min(total_durations):.6f}, max={np.max(total_durations):.6f}")
 
-        # Mode-specific details
-        if mode == 'sequential' and mode_results:
-            h2d_durations = [r['h2d_duration'] for r in mode_results if 'h2d_duration' in r]
-            compute_durations = [r['compute_duration'] for r in mode_results if 'compute_duration' in r]
-            d2h_durations = [r['d2h_duration'] for r in mode_results if 'd2h_duration' in r]
-
-            if h2d_durations:
-                print(f"  H2D Duration (s): mean={np.mean(h2d_durations):.6f}")
-            if compute_durations:
-                print(f"  Compute Duration (s): mean={np.mean(compute_durations):.6f}")
-            if d2h_durations:
-                print(f"  D2H Duration (s): mean={np.mean(d2h_durations):.6f}")
-
-            if h2d_durations and compute_durations and d2h_durations:
-                total_stages = np.mean(h2d_durations) + np.mean(compute_durations) + np.mean(d2h_durations)
-                overlap_efficiency = (total_stages - np.mean(total_durations)) / total_stages * 100
-                print(f"  Overlap Efficiency: {overlap_efficiency:.1f}%")
+    # Calculate throughput
+    if results:
+        batch_sizes = [r['batch_size'] for r in results]
+        avg_batch_size = np.mean(batch_sizes)
+        avg_duration = np.mean(total_durations)
+        throughput = avg_batch_size / avg_duration
+        print(f"  Average Throughput: {throughput:.2f} samples/s")
 
 def main():
-    parser = argparse.ArgumentParser(description='GPU NUMA Pipeline Performance Test with Double Buffering')
+    parser = argparse.ArgumentParser(description='GPU NUMA Pipeline Performance Test with ViT Double Buffering')
 
     # Core parameters
     parser.add_argument('--gpu-id', type=int, default=0,
@@ -632,18 +450,22 @@ def main():
                         help='Number of warmup samples (default: 100)')
     parser.add_argument('--memory-size-mb', type=int, default=512,
                         help='CPU memory pool size in MB (default: 512)')
-    parser.add_argument('--compute-iterations', type=int, default=100,
-                        help='Compute iterations per batch (default: 100)')
 
-    # Pipeline control
-    parser.add_argument('--pipeline-modes', nargs='+',
-                        choices=['sequential', 'overlapped_simple', 'overlapped_double_buffer'],
-                        default=['sequential', 'overlapped_simple', 'overlapped_double_buffer'],
-                        help='Pipeline modes to test')
-    parser.add_argument('--sync-frequency', type=int, default=10,
-                        help='Synchronization frequency for progress reporting (default: 10)')
+    # ViT configuration parameters
+    parser.add_argument('--vit-patch-size', type=int, default=32,
+                        help='ViT patch size (default: 32)')
+    parser.add_argument('--vit-depth', type=int, default=6,
+                        help='ViT number of transformer blocks (default: 6)')
+    parser.add_argument('--vit-heads', type=int, default=8,
+                        help='ViT number of attention heads (default: 8)')
+    parser.add_argument('--vit-dim', type=int, default=512,
+                        help='ViT embedding dimension (default: 512)')
+    parser.add_argument('--vit-mlp-dim', type=int, default=2048,
+                        help='ViT MLP dimension (default: 2048)')
 
     # Test control
+    parser.add_argument('--sync-frequency', type=int, default=10,
+                        help='Synchronization frequency for progress reporting (default: 10)')
     parser.add_argument('--skip-warmup', action='store_true',
                         help='Skip warmup phase for quick tests')
     parser.add_argument('--deterministic', action='store_true',
@@ -657,7 +479,7 @@ def main():
 
     # Profiling and automation
     parser.add_argument('--nsys-report', type=str, default=None,
-                        help='NSYS report name for automation')
+                        help='NSYS report name for automation (deprecated - handled by shell script)')
 
     args = parser.parse_args()
 
@@ -668,13 +490,15 @@ def main():
         batch_size=args.batch_size,
         warmup_samples=args.warmup_samples,
         memory_size_mb=args.memory_size_mb,
-        compute_iterations=args.compute_iterations,
+        patch_size=args.vit_patch_size,
+        depth=args.vit_depth,
+        heads=args.vit_heads,
+        dim=args.vit_dim,
+        mlp_dim=args.vit_mlp_dim,
         skip_warmup=args.skip_warmup,
         deterministic=args.deterministic,
-        nsys_report=args.nsys_report,
         pin_memory=not args.no_pin_memory,
         fill_pattern=args.fill_pattern,
-        pipeline_modes=args.pipeline_modes,
         sync_frequency=args.sync_frequency
     )
 
