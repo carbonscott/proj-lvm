@@ -15,10 +15,9 @@ import torch.cuda.nvtx as nvtx
 import time
 import argparse
 import numpy as np
-import os
 import psutil
 import sys
-from collections import defaultdict
+import os
 
 # Check for vit-pytorch availability
 try:
@@ -134,6 +133,16 @@ class DoubleBufferedPipeline:
         self.compute_stream = torch.cuda.Stream(device=gpu_id)
         self.d2h_stream = torch.cuda.Stream(device=gpu_id)
 
+        # CUDA events for per-buffer D2H completion (fine-grained synchronization)
+        self.d2h_done_event = {
+            'A': torch.cuda.Event(enable_timing=False),
+            'B': torch.cuda.Event(enable_timing=False)
+        }
+
+        # Prime both events so wait_event() never deadlocks on first use
+        for ev in self.d2h_done_event.values():
+            ev.record()   # record on default stream makes them signalled immediately
+
         # Create ViT model
         self.vit_model, self.image_size = create_vit_model(
             tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id
@@ -141,90 +150,98 @@ class DoubleBufferedPipeline:
 
         # Double buffers on GPU (with ViT-compatible size)
         C = tensor_shape[0]
-        self.gpu_buffer_a = torch.zeros(batch_size, C, self.image_size, self.image_size, device=f'cuda:{gpu_id}')
-        self.gpu_buffer_b = torch.zeros(batch_size, C, self.image_size, self.image_size, device=f'cuda:{gpu_id}')
+        self.gpu_buffers = {
+            'A': torch.zeros(batch_size, C, self.image_size, self.image_size, device=f'cuda:{gpu_id}'),
+            'B': torch.zeros(batch_size, C, self.image_size, self.image_size, device=f'cuda:{gpu_id}')
+        }
 
-        # CPU result buffers (original tensor shape)
-        self.cpu_result_buffer_a = [torch.zeros(*tensor_shape) for _ in range(batch_size)]
-        self.cpu_result_buffer_b = [torch.zeros(*tensor_shape) for _ in range(batch_size)]
-
-        if pin_memory:
-            for i in range(batch_size):
-                self.cpu_result_buffer_a[i] = self.cpu_result_buffer_a[i].pin_memory()
-                self.cpu_result_buffer_b[i] = self.cpu_result_buffer_b[i].pin_memory()
+        # Single contiguous pinned host buffers (better D2H bandwidth)
+        shape = (batch_size, *tensor_shape)
+        self.cpu_buffers = {
+            'A': torch.empty(shape, pin_memory=pin_memory),
+            'B': torch.empty(shape, pin_memory=pin_memory)
+        }
 
         # Pipeline state
-        self.current_buffer = 'A'  # 'A' or 'B'
+        self.current = 'A'
 
-    def get_current_buffers(self):
-        """Get current GPU and CPU buffers"""
-        if self.current_buffer == 'A':
-            return self.gpu_buffer_a, self.cpu_result_buffer_a
-        else:
-            return self.gpu_buffer_b, self.cpu_result_buffer_b
-
-    def swap_buffers(self):
+    def swap(self):
         """Swap current buffer"""
-        self.current_buffer = 'B' if self.current_buffer == 'A' else 'A'
+        self.current = 'B' if self.current == 'A' else 'A'
 
-    def h2d_transfer(self, cpu_batch, batch_idx, nvtx_prefix):
-        """Perform H2D transfer to current buffer"""
-        gpu_buffer, _ = self.get_current_buffers()
+    def h2d_transfer(self, cpu_batch, batch_idx, current_batch_size, nvtx_prefix):
+        """Perform H2D transfer with fine-grained event-based synchronization"""
+        gpu_buffer = self.gpu_buffers[self.current]
+        d2h_event = self.d2h_done_event[self.current]
 
         with torch.cuda.stream(self.h2d_stream):
             with nvtx.range(f"{nvtx_prefix}_h2d_batch_{batch_idx}"):
-                for i, tensor in enumerate(cpu_batch):
-                    with nvtx.range(f"h2d_tensor_{i}"):
-                        # Resize tensor to ViT-compatible size if needed
-                        if tensor.shape[-2:] != (self.image_size, self.image_size):
-                            resized_tensor = torch.nn.functional.interpolate(
-                                tensor.unsqueeze(0),
-                                size=(self.image_size, self.image_size),
-                                mode='bilinear',
-                                align_corners=False
-                            ).squeeze(0)
-                            gpu_buffer[i].copy_(resized_tensor, non_blocking=True)
-                        else:
-                            gpu_buffer[i].copy_(tensor, non_blocking=True)
+                # Fine-grained synchronization: wait only for THIS buffer's D2H completion
+                if batch_idx > 0:
+                    self.h2d_stream.wait_event(d2h_event)
 
-    def compute_workload(self, batch_idx, nvtx_prefix):
-        """Perform ViT compute workload on current buffer"""
-        gpu_buffer, _ = self.get_current_buffers()
+                # Copy only the valid batch size
+                for i in range(current_batch_size):
+                    tensor = cpu_batch[i]
+                    # Resize tensor to ViT-compatible size if needed
+                    if tensor.shape[-2:] != (self.image_size, self.image_size):
+                        resized_tensor = torch.nn.functional.interpolate(
+                            tensor.unsqueeze(0),
+                            size=(self.image_size, self.image_size),
+                            mode='bilinear',
+                            align_corners=False
+                        ).squeeze(0)
+                        gpu_buffer[i].copy_(resized_tensor, non_blocking=True)
+                    else:
+                        gpu_buffer[i].copy_(tensor, non_blocking=True)
+
+    def compute_workload(self, batch_idx, current_batch_size, nvtx_prefix):
+        """Perform ViT compute workload on current buffer (only valid slice)"""
+        gpu_buffer = self.gpu_buffers[self.current]
 
         with torch.cuda.stream(self.compute_stream):
             with nvtx.range(f"{nvtx_prefix}_compute_batch_{batch_idx}"):
                 # Wait for H2D to complete
                 self.compute_stream.wait_stream(self.h2d_stream)
 
+                # Process only the valid slice for variable-sized batches
+                valid_gpu_slice = gpu_buffer[:current_batch_size]
+
                 # Run ViT inference
                 with torch.no_grad():
                     with nvtx.range(f"vit_forward_{batch_idx}"):
-                        predictions = self.vit_model(gpu_buffer)
+                        predictions = self.vit_model(valid_gpu_slice)
                         # Force compute completion with a small operation
                         _ = predictions.sum()
 
-    def d2h_transfer(self, batch_idx, nvtx_prefix):
-        """Perform D2H transfer from current buffer"""
-        gpu_buffer, cpu_result_buffer = self.get_current_buffers()
+    def d2h_transfer(self, batch_idx, current_batch_size, nvtx_prefix):
+        """Perform D2H transfer from current buffer (only valid slice)"""
+        gpu_buffer = self.gpu_buffers[self.current]
+        cpu_buffer = self.cpu_buffers[self.current]
+        d2h_event = self.d2h_done_event[self.current]
 
         with torch.cuda.stream(self.d2h_stream):
             with nvtx.range(f"{nvtx_prefix}_d2h_batch_{batch_idx}"):
                 # Wait for compute to complete
                 self.d2h_stream.wait_stream(self.compute_stream)
 
-                for i in range(len(cpu_result_buffer)):
-                    with nvtx.range(f"d2h_tensor_{i}"):
-                        # Resize back to original shape if needed
-                        if gpu_buffer[i].shape[-2:] != self.tensor_shape[-2:]:
-                            resized_tensor = torch.nn.functional.interpolate(
-                                gpu_buffer[i].unsqueeze(0),
-                                size=self.tensor_shape[-2:],
-                                mode='bilinear',
-                                align_corners=False
-                            ).squeeze(0)
-                            cpu_result_buffer[i].copy_(resized_tensor, non_blocking=True)
-                        else:
-                            cpu_result_buffer[i].copy_(gpu_buffer[i], non_blocking=True)
+                # Copy back only the valid slice
+                for i in range(current_batch_size):
+                    gpu_tensor = gpu_buffer[i]
+                    # Resize back to original shape if needed
+                    if gpu_tensor.shape[-2:] != self.tensor_shape[-2:]:
+                        resized_tensor = torch.nn.functional.interpolate(
+                            gpu_tensor.unsqueeze(0),
+                            size=self.tensor_shape[-2:],
+                            mode='bilinear',
+                            align_corners=False
+                        ).squeeze(0)
+                        cpu_buffer[i].copy_(resized_tensor, non_blocking=True)
+                    else:
+                        cpu_buffer[i].copy_(gpu_tensor, non_blocking=True)
+
+                # Record completion event for this specific buffer
+                self.d2h_stream.record_event(d2h_event)
 
     def wait_for_completion(self):
         """Wait for all pipeline stages to complete"""
@@ -326,6 +343,9 @@ def run_pipeline_test(
 
     print(f"Generated {len(cpu_tensors)} CPU tensors")
 
+    # Free memory pool after warmup to save RAM
+    del memory_pool
+
     # Create pipeline
     pipeline = DoubleBufferedPipeline(
         batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory
@@ -354,7 +374,7 @@ def run_pipeline_test(
     print("Use nsys GUI or stats to analyze the detailed profiling data.")
 
 def _run_double_buffer_pipeline(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency, is_warmup):
-    """Run fully overlapped double buffered pipeline"""
+    """Run fully overlapped double buffered pipeline with optimal performance"""
     results = []
 
     with nvtx.range(f"{nvtx_prefix}_double_buffer"):
@@ -371,29 +391,30 @@ def _run_double_buffer_pipeline(pipeline, tensors, batch_size, nvtx_prefix, sync
 
                 if batch_idx == 0:
                     # First batch: just start the pipeline
-                    pipeline.h2d_transfer(batch_tensors, batch_idx, nvtx_prefix)
-                    pipeline.compute_workload(batch_idx, nvtx_prefix)
-                    pipeline.d2h_transfer(batch_idx, nvtx_prefix)
+                    pipeline.h2d_transfer(batch_tensors, batch_idx, current_batch_size, nvtx_prefix)
+                    pipeline.compute_workload(batch_idx, current_batch_size, nvtx_prefix)
+                    pipeline.d2h_transfer(batch_idx, current_batch_size, nvtx_prefix)
                 else:
                     # Overlapped execution: start next batch while finishing previous
                     # Swap to next buffer
-                    pipeline.swap_buffers()
+                    pipeline.swap()
 
-                    # Start H2D for current batch (in new buffer)
-                    pipeline.h2d_transfer(batch_tensors, batch_idx, nvtx_prefix)
+                    # Start H2D for current batch (will wait for THIS buffer's D2H via event)
+                    pipeline.h2d_transfer(batch_tensors, batch_idx, current_batch_size, nvtx_prefix)
 
-                    # Wait for previous batch D2H to complete
-                    pipeline.d2h_stream.synchronize()
+                    # Start compute for current batch (will wait for H2D)
+                    pipeline.compute_workload(batch_idx, current_batch_size, nvtx_prefix)
 
-                    # Start compute for current batch
-                    pipeline.compute_workload(batch_idx, nvtx_prefix)
+                    # Start D2H for current batch (will wait for compute and record event)
+                    pipeline.d2h_transfer(batch_idx, current_batch_size, nvtx_prefix)
 
-                    # Start D2H for current batch
-                    pipeline.d2h_transfer(batch_idx, nvtx_prefix)
-
-                # For last batch, wait for completion
+                # For last batch, wait for completion and get accurate timing
                 if batch_idx == num_batches - 1:
                     pipeline.wait_for_completion()
+
+                # Only synchronize for timing when needed (preserves overlap for other batches)
+                if not is_warmup and batch_idx > 0 and batch_idx == num_batches - 1:
+                    torch.cuda.synchronize()
 
                 end_time = time.time()
 
