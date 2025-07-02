@@ -221,7 +221,7 @@ class DoubleBufferedPipeline:
                     valid_gpu_slice = gpu_buffer[:current_batch_size]
                     # Run ViT inference
                     with torch.no_grad():
-                        with nvtx.range(f"vit_forward_{batch_idx}"):
+                        with nvtx.range(f"{nvtx_prefix}_vit_forward_{batch_idx}"):
                             predictions = self.vit_model(valid_gpu_slice)
                             # Force compute completion with a small operation
                             _ = predictions.sum()
