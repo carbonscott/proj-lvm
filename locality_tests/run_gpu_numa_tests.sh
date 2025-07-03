@@ -50,7 +50,7 @@ validate_numa_node() {
         return 1
     fi
     return 0
-}
+}c
 
 get_available_numa_nodes() {
     local available_nodes=()

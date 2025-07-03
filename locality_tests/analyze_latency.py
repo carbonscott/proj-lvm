@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 from contextlib import contextmanager
 from typing import Dict, List, Any, Optional, Tuple
+import re
 
 class SQLiteCUPTIAnalyzer:
     def __init__(self, db_path: str):
@@ -88,9 +89,50 @@ class SQLiteCUPTIAnalyzer:
                     for col in columns:
                         self.schema_info[table][col] = col in existing_columns
 
-                except sqlite3.OperationalError:
-                    # Table doesn't exist
-                    self.schema_info[table] = {col: False for col in columns}
+                except sqlite3.OperationalError as e:
+                    if "no such table" in str(e).lower():
+                        # Table doesn't exist
+                        self.schema_info[table] = {col: False for col in columns}
+                    else:
+                        raise
+
+    def parse_configuration(self) -> Dict[str, Any]:
+        """Extract configuration details from filename."""
+        config = {
+            'gpu_id': 'unknown',
+            'numa_node': 'unknown',
+            'vit_patch_size': 'unknown',
+            'vit_depth': 'unknown',
+            'vit_dim': 'unknown',
+            'test_type': 'unknown'
+        }
+
+        # Pattern: pipeline_gpu{N}_numa{N}_vit{patch}x{depth}x{dim}
+        pipeline_pattern = r'pipeline_gpu(\d+)_numa(\d+)_vit(\d+)x(\d+)x(\d+)'
+        match = re.search(pipeline_pattern, self.config_name)
+
+        if match:
+            config.update({
+                'gpu_id': int(match.group(1)),
+                'numa_node': int(match.group(2)),
+                'vit_patch_size': int(match.group(3)),
+                'vit_depth': int(match.group(4)),
+                'vit_dim': int(match.group(5)),
+                'test_type': 'ViT Pipeline' if int(match.group(4)) > 0 else 'H2D/D2H Only'
+            })
+        else:
+            # Try h2d_d2h pattern
+            h2d_pattern = r'h2d_d2h_gpu(\d+)_numa(\d+)'
+            match = re.search(h2d_pattern, self.config_name)
+            if match:
+                config.update({
+                    'gpu_id': int(match.group(1)),
+                    'numa_node': int(match.group(2)),
+                    'vit_depth': 0,
+                    'test_type': 'H2D/D2H Only'
+                })
+
+        return config
 
     def get_time_conditions(self) -> Tuple[str, Tuple[int, ...]]:
         """Get time filter conditions and parameters for individual WHERE clauses."""
@@ -162,8 +204,11 @@ class SQLiteCUPTIAnalyzer:
                             'total': total_count,
                             'filtered': total_count
                         }
-                except sqlite3.OperationalError:
-                    table_info[table_name] = {'total': 0, 'filtered': 0}
+                except sqlite3.OperationalError as e:
+                    if "no such table" in str(e).lower():
+                        table_info[table_name] = {'total': 0, 'filtered': 0}
+                    else:
+                        raise
 
             return table_info
 
@@ -176,8 +221,219 @@ class SQLiteCUPTIAnalyzer:
                 # Check for kernel table (minimum requirement)
                 kernel_count = cursor.execute('SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL').fetchone()[0]
                 return kernel_count > 0
-            except sqlite3.OperationalError:
-                return False
+            except sqlite3.OperationalError as e:
+                if "no such table" in str(e).lower():
+                    return False
+                else:
+                    raise
+
+    def analyze_memory_transfers(self) -> Dict[str, Any]:
+        """Analyze H2D and D2H transfer performance."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            time_condition, time_params = self.get_time_conditions()
+
+            # Check if memcpy table exists
+            try:
+                cursor.execute('SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_MEMCPY LIMIT 1')
+            except sqlite3.OperationalError as e:
+                if "no such table" in str(e).lower():
+                    return {'error': 'MEMCPY table not found'}
+                else:
+                    raise
+
+            where_clause = f"WHERE {time_condition}" if time_condition else ""
+
+            # Determine column name for copy kind (schema variations)
+            copy_kind_col = 'copyKind' if self.schema_info.get('CUPTI_ACTIVITY_KIND_MEMCPY', {}).get('copyKind', False) else 'memcpyKind'
+
+            # Check if bytes column exists - fail clearly if missing
+            if not self.schema_info.get('CUPTI_ACTIVITY_KIND_MEMCPY', {}).get('bytes', False):
+                return {'error': 'MEMCPY table missing bytes column - cannot calculate bandwidth'}
+            bytes_col = 'bytes'
+
+            query = f"""
+            WITH transfer_stats AS (
+                SELECT
+                    {copy_kind_col} as copy_kind,
+                    COUNT(*) as transfer_count,
+                    SUM({bytes_col}) as total_bytes,
+                    SUM("end" - start) as total_duration_ns,
+                    AVG("end" - start) as avg_duration_ns,
+                    MIN("end" - start) as min_duration_ns,
+                    MAX("end" - start) as max_duration_ns,
+                    MIN(start) as first_transfer,
+                    MAX("end") as last_transfer
+                FROM CUPTI_ACTIVITY_KIND_MEMCPY
+                {where_clause}
+                GROUP BY {copy_kind_col}
+            )
+            SELECT
+                copy_kind,
+                transfer_count,
+                total_bytes,
+                total_duration_ns,
+                avg_duration_ns,
+                min_duration_ns,
+                max_duration_ns,
+                first_transfer,
+                last_transfer,
+                CASE
+                    WHEN total_duration_ns > 0 THEN (total_bytes / (total_duration_ns / 1e9)) / (1024.0 * 1024.0)
+                    ELSE 0
+                END as avg_bandwidth_mbps
+            FROM transfer_stats
+            ORDER BY copy_kind
+            """
+
+            try:
+                results = cursor.execute(query, time_params).fetchall()
+                columns = [desc[0] for desc in cursor.description]
+
+                transfers = {}
+                for row in results:
+                    transfer_data = dict(zip(columns, row))
+                    copy_kind = transfer_data['copy_kind']
+
+                    # Map copy kinds to readable names
+                    if copy_kind == 1:  # HtoD
+                        transfers['h2d'] = transfer_data
+                    elif copy_kind == 2:  # DtoH
+                        transfers['d2h'] = transfer_data
+                    else:
+                        transfers[f'other_{copy_kind}'] = transfer_data
+
+                return transfers
+            except sqlite3.OperationalError as e:
+                return {'error': f'Query failed: {e}'}
+
+    def analyze_compute_performance(self) -> Dict[str, Any]:
+        """Analyze kernel execution statistics."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            time_condition, time_params = self.get_time_conditions()
+
+            where_clause = f"WHERE {time_condition}" if time_condition else ""
+
+            query = f"""
+            SELECT
+                COUNT(*) as total_kernels,
+                SUM("end" - start) as total_compute_time_ns,
+                AVG("end" - start) as avg_kernel_duration_ns,
+                MIN("end" - start) as min_kernel_duration_ns,
+                MAX("end" - start) as max_kernel_duration_ns,
+                MIN(start) as first_kernel_start,
+                MAX("end") as last_kernel_end
+            FROM CUPTI_ACTIVITY_KIND_KERNEL
+            {where_clause}
+            """
+
+            try:
+                result = cursor.execute(query, time_params).fetchone()
+                columns = [desc[0] for desc in cursor.description]
+
+                if result and result[0] is not None:
+                    compute_stats = dict(zip(columns, result))
+
+                    # Calculate additional metrics
+                    if compute_stats['first_kernel_start'] and compute_stats['last_kernel_end']:
+                        total_timeline = compute_stats['last_kernel_end'] - compute_stats['first_kernel_start']
+                        compute_stats['total_timeline_ns'] = total_timeline
+                        compute_stats['compute_utilization'] = self.safe_divide(
+                            compute_stats['total_compute_time_ns'], total_timeline
+                        )
+
+                    return compute_stats
+                return {}
+            except sqlite3.OperationalError as e:
+                return {'error': f'Query failed: {e}'}
+
+    def analyze_pipeline_gaps_detailed(self) -> Dict[str, Any]:
+        """Enhanced gap analysis with distribution info."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            time_condition, time_params = self.get_time_conditions()
+
+            # Check if both required tables exist
+            try:
+                cursor.execute('SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_RUNTIME LIMIT 1')
+                cursor.execute('SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL LIMIT 1')
+            except sqlite3.OperationalError as e:
+                if "no such table" in str(e).lower():
+                    return {'error': 'Pipeline analysis requires both RUNTIME and KERNEL tables'}
+                else:
+                    raise
+
+            if time_condition:
+                # Use proper table aliases instead of string replacement
+                r_condition = time_condition.replace('start', 'r.start').replace('"end"', 'r."end"')
+                k_condition = time_condition.replace('start', 'k.start').replace('"end"', 'k."end"')
+                where_clause = f"WHERE ({r_condition}) AND ({k_condition})"
+                query_params = time_params + time_params
+            else:
+                where_clause = ""
+                query_params = ()
+
+            query = f"""
+            WITH pipeline_flow AS (
+                SELECT
+                    r.start AS api_start,
+                    r."end" AS api_end,
+                    k.start AS gpu_start,
+                    k."end" AS gpu_end,
+                    k.streamId,
+                    (k.start - r."end") AS preparation_time,
+                    (k."end" - k.start) AS execution_time,
+                    (r."end" - r.start) AS api_time,
+                    ROW_NUMBER() OVER (ORDER BY k.start) as execution_order
+                FROM CUPTI_ACTIVITY_KIND_RUNTIME r
+                JOIN CUPTI_ACTIVITY_KIND_KERNEL k ON r.correlationId = k.correlationId
+                {where_clause}
+                ORDER BY k.start
+            ),
+            pipeline_gaps AS (
+                SELECT
+                    execution_order,
+                    gpu_start,
+                    gpu_end,
+                    streamId,
+                    LAG(gpu_end) OVER (PARTITION BY streamId ORDER BY gpu_start) as prev_gpu_end,
+                    CASE
+                        WHEN LAG(gpu_end) OVER (PARTITION BY streamId ORDER BY gpu_start) IS NOT NULL
+                        THEN gpu_start - LAG(gpu_end) OVER (PARTITION BY streamId ORDER BY gpu_start)
+                        ELSE 0
+                    END as gap_ns
+                FROM pipeline_flow
+            )
+            SELECT
+                COUNT(DISTINCT pf.execution_order) as total_kernels,
+                AVG(pf.preparation_time) / 1e3 as avg_preparation_us,
+                AVG(pf.execution_time) / 1e6 as avg_execution_ms,
+                SUM(pf.execution_time) / 1e6 as total_compute_time_ms,
+                (MAX(pf.gpu_end) - MIN(pf.gpu_start)) / 1e6 as total_timeline_ms,
+                1.0 - (COALESCE(SUM(CASE WHEN pg.gap_ns > 1000 THEN pg.gap_ns ELSE 0 END), 0) /
+                       CAST(MAX(pf.gpu_end) - MIN(pf.gpu_start) AS FLOAT)) as pipeline_efficiency,
+                COUNT(pg.gap_ns) - 1 as total_gaps,
+                COALESCE(SUM(CASE WHEN pg.gap_ns > 1000 THEN pg.gap_ns ELSE 0 END), 0) as total_significant_gap_time_ns,
+                COALESCE(SUM(CASE WHEN pg.gap_ns > 1000 THEN 1 ELSE 0 END), 0) as significant_gaps_count,
+                COALESCE(SUM(CASE WHEN pg.gap_ns > 10000 THEN 1 ELSE 0 END), 0) as large_gaps_count,
+                COALESCE(SUM(CASE WHEN pg.gap_ns > 100000 THEN 1 ELSE 0 END), 0) as very_large_gaps_count,
+                AVG(CASE WHEN pg.gap_ns > 0 THEN pg.gap_ns END) as avg_gap_ns,
+                MAX(pg.gap_ns) as max_gap_ns,
+                MIN(CASE WHEN pg.gap_ns > 0 THEN pg.gap_ns END) as min_positive_gap_ns
+            FROM pipeline_flow pf
+            LEFT JOIN pipeline_gaps pg ON pf.execution_order = pg.execution_order
+            """
+
+            try:
+                result = cursor.execute(query, query_params).fetchone()
+                columns = [desc[0] for desc in cursor.description]
+
+                if result and result[0] is not None:
+                    return dict(zip(columns, result))
+                return {}
+            except sqlite3.OperationalError as e:
+                return {'error': f'Query failed: {e}'}
 
     def analyze_temporal_compression_ratio(self) -> Dict[str, Any]:
         """
@@ -208,7 +464,7 @@ class SQLiteCUPTIAnalyzer:
                     where_clause = f"WHERE {time_condition}" if time_condition else ""
                     union_parts.append(f"""
                         SELECT start, "end", '{op_type}' as op_type, streamId
-                        FROM {table_name} {where_clause}
+                        FROM "{table_name}" {where_clause}
                     """)
                     if time_condition:
                         all_params.extend(time_params)
@@ -218,8 +474,7 @@ class SQLiteCUPTIAnalyzer:
                     continue
 
             if not union_parts:
-                print("No CUPTI activity tables found")
-                return {}
+                return {'error': 'No CUPTI activity tables found'}
 
             # Build the full query
             union_query = " UNION ALL ".join(union_parts)
@@ -275,178 +530,16 @@ class SQLiteCUPTIAnalyzer:
                         'total_operations': result[6],
                         'active_streams': result[7],
                         'avg_stream_utilization': result[8] or 0,
-                        'total_stream_idle_ms': result[9] or 0,
-                        'latency_hiding_effectiveness': result[5]
+                        'total_stream_idle_ms': result[9] or 0
                     }
                 return {}
             except sqlite3.OperationalError as e:
-                print(f"Database error in temporal compression ratio analysis: {e}")
-                return {}
+                return {'error': f'Query failed: {e}'}
 
-    def analyze_stream_overlap(self) -> List[Dict[str, Any]]:
-        """
-        Analyze per-stream efficiency with safe table handling.
-        """
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            time_condition, time_params = self.get_time_conditions()
 
-            # Build union only for existing tables
-            union_parts = []
-            all_params = []
-
-            tables_to_check = [
-                ('CUPTI_ACTIVITY_KIND_KERNEL', 'kernel'),
-                ('CUPTI_ACTIVITY_KIND_MEMCPY', 'memcpy'),
-                ('CUPTI_ACTIVITY_KIND_MEMSET', 'memset')
-            ]
-
-            for table_name, op_type in tables_to_check:
-                try:
-                    cursor.execute(f'SELECT COUNT(*) FROM "{table_name}" LIMIT 1')
-                    where_clause = f"WHERE {time_condition}" if time_condition else ""
-                    union_parts.append(f"""
-                        SELECT streamId, start, "end", '{op_type}' as op_type,
-                               ("end" - start) as duration
-                        FROM {table_name} {where_clause}
-                    """)
-                    if time_condition:
-                        all_params.extend(time_params)
-                except sqlite3.OperationalError:
-                    continue
-
-            if not union_parts:
-                return []
-
-            union_query = " UNION ALL ".join(union_parts)
-
-            query = f"""
-            WITH ops AS (
-                {union_query}
-            ),
-            stream_stats AS (
-                SELECT streamId,
-                       COUNT(CASE WHEN op_type='kernel' THEN 1 END) AS kernel_count,
-                       COUNT(CASE WHEN op_type IN ('memcpy', 'memset') THEN 1 END) AS memory_count,
-                       SUM(CASE WHEN op_type='kernel' THEN duration END) / 1e6 AS compute_ms,
-                       SUM(CASE WHEN op_type IN ('memcpy', 'memset') THEN duration END) / 1e6 AS memory_ms,
-                       (MAX("end") - MIN(start)) / 1e6 AS span_ms,
-                       SUM(duration) / 1e6 AS total_ops_ms,
-                       ((MAX("end") - MIN(start)) - SUM(duration)) / 1e6 AS idle_time_ms
-                FROM ops
-                GROUP BY streamId
-            )
-            SELECT *,
-                   CASE WHEN span_ms > 0 THEN total_ops_ms / span_ms ELSE 0 END as stream_efficiency,
-                   CASE WHEN span_ms > 0 THEN idle_time_ms / span_ms ELSE 0 END as idle_percentage,
-                   CASE WHEN span_ms > 0 THEN (kernel_count + memory_count) / span_ms ELSE 0 END as ops_per_ms,
-                   CASE
-                       WHEN kernel_count > 0 AND memory_count > 0 THEN 'mixed'
-                       WHEN kernel_count > 0 THEN 'compute_only'
-                       WHEN memory_count > 0 THEN 'memory_only'
-                       ELSE 'empty'
-                   END as stream_type
-            FROM stream_stats
-            ORDER BY streamId
-            """
-
-            try:
-                results = cursor.execute(query, all_params).fetchall()
-                columns = [desc[0] for desc in cursor.description]
-                return [dict(zip(columns, row)) for row in results]
-            except sqlite3.OperationalError as e:
-                print(f"Database error in stream analysis: {e}")
-                return []
-
-    def analyze_pipeline_efficiency(self) -> Optional[Dict[str, Any]]:
-        """
-        Analyze pipeline efficiency with safe table handling.
-        """
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            time_condition, time_params = self.get_time_conditions()
-
-            # Check if both required tables exist
-            try:
-                cursor.execute('SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_RUNTIME LIMIT 1')
-                cursor.execute('SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL LIMIT 1')
-            except sqlite3.OperationalError:
-                print("Pipeline analysis requires both RUNTIME and KERNEL tables")
-                return None
-
-            if time_condition:
-                k_condition = time_condition.replace('start', 'k.start').replace('"end"', 'k."end"')
-                r_condition = time_condition.replace('start', 'r.start').replace('"end"', 'r."end"')
-                where_clause = f"WHERE ({k_condition}) AND ({r_condition})"
-                query_params = time_params + time_params
-            else:
-                where_clause = ""
-                query_params = ()
-
-            query = f"""
-            WITH pipeline_flow AS (
-                SELECT
-                    r.start  AS api_start,
-                    r."end"    AS api_end,
-                    k.start  AS gpu_start,
-                    k."end"    AS gpu_end,
-                    k.streamId,
-                    (k.start - r."end") AS preparation_time,
-                    (k."end" - k.start) AS execution_time,
-                    (r."end" - r.start) AS api_time,
-                    ROW_NUMBER() OVER (ORDER BY k.start) as execution_order
-                FROM    CUPTI_ACTIVITY_KIND_RUNTIME r
-                JOIN    CUPTI_ACTIVITY_KIND_KERNEL  k ON r.correlationId = k.correlationId
-                {where_clause}
-                ORDER BY k.start
-            ),
-            pipeline_gaps AS (
-                SELECT
-                    execution_order,
-                    gpu_start,
-                    gpu_end,
-                    streamId,
-                    LAG(gpu_end) OVER (ORDER BY gpu_start) as prev_gpu_end,
-                    CASE
-                        WHEN LAG(gpu_end) OVER (ORDER BY gpu_start) IS NOT NULL
-                        THEN gpu_start - LAG(gpu_end) OVER (ORDER BY gpu_start)
-                        ELSE 0
-                    END as actual_gap_ns
-                FROM pipeline_flow
-            )
-            SELECT
-                COUNT(*) as total_kernels,
-                AVG(preparation_time) / 1e3 as avg_preparation_us,
-                AVG(execution_time) / 1e6 as avg_execution_ms,
-                SUM(CASE WHEN actual_gap_ns > 1000 THEN actual_gap_ns ELSE 0 END) / 1e6 as total_gap_time_ms,
-                SUM(CASE WHEN actual_gap_ns > 1000 THEN 1 ELSE 0 END) as significant_gaps,
-                AVG(CASE WHEN actual_gap_ns > 0 THEN actual_gap_ns END) / 1e3 as avg_gap_us,
-                1.0 - (SUM(CASE WHEN actual_gap_ns > 1000 THEN actual_gap_ns ELSE 0 END) /
-                       CAST(MAX(gpu_end) - MIN(gpu_start) AS FLOAT)) as pipeline_efficiency
-            FROM pipeline_flow pf
-            LEFT JOIN pipeline_gaps pg ON pf.execution_order = pg.execution_order
-            """
-
-            try:
-                result = cursor.execute(query, query_params).fetchone()
-
-                if result and result[0] is not None:
-                    return {
-                        'total_kernels': result[0],
-                        'avg_preparation_us': result[1] or 0,
-                        'avg_execution_ms': result[2] or 0,
-                        'total_gap_time_ms': result[3] or 0,
-                        'significant_gaps': result[4] or 0,
-                        'avg_gap_us': result[5] or 0,
-                        'pipeline_efficiency': result[6] or 0
-                    }
-                return None
-            except sqlite3.OperationalError as e:
-                print(f"Database error in pipeline efficiency analysis: {e}")
-                return None
 
     def run_full_analysis(self, analyze_full_trace: bool = False) -> Dict[str, Any]:
-        """Run latency hiding analysis with safe error handling."""
+        """Run comprehensive analysis with objective metrics."""
         print(f"Analyzing configuration: {self.config_name}")
 
         # Check if we have minimum required tables
@@ -458,6 +551,7 @@ class SQLiteCUPTIAnalyzer:
             }
 
         self.probe_schema()
+        config = self.parse_configuration()
 
         if not analyze_full_trace:
             found_test_range = self.find_test_time_range()
@@ -469,29 +563,35 @@ class SQLiteCUPTIAnalyzer:
         table_info = self.get_table_info()
         print(f"Tables found: {table_info}")
 
-        print("Analyzing temporal compression ratio (primary latency hiding metric)...")
-        temporal_compression_analysis = self.analyze_temporal_compression_ratio()
+        # Run all analysis components
+        print("Analyzing memory transfers...")
+        memory_transfers = self.analyze_memory_transfers()
 
-        print("Analyzing stream efficiency...")
-        stream_analysis = self.analyze_stream_overlap()
+        print("Analyzing compute performance...")
+        compute_performance = self.analyze_compute_performance()
 
-        print("Analyzing pipeline efficiency...")
-        pipeline_efficiency = self.analyze_pipeline_efficiency()
+        print("Analyzing pipeline gaps...")
+        pipeline_analysis = self.analyze_pipeline_gaps_detailed()
+
+        print("Analyzing temporal compression ratio...")
+        temporal_compression = self.analyze_temporal_compression_ratio()
 
         results = {
             'config_name': self.config_name,
+            'configuration': config,
             'test_time_range': self.test_time_range,
             'filtered_analysis': found_test_range,
             'table_info': table_info,
-            'temporal_compression_analysis': temporal_compression_analysis,
-            'stream_analysis': stream_analysis,
-            'pipeline_efficiency': pipeline_efficiency
+            'memory_transfers': memory_transfers,
+            'compute_performance': compute_performance,
+            'pipeline_analysis': pipeline_analysis,
+            'temporal_compression': temporal_compression
         }
 
         return results
 
 def write_analysis_results(results: Dict[str, Any], output_file):
-    """Write analysis results."""
+    """Write objective analysis results."""
     config_name = results['config_name']
 
     if 'error' in results:
@@ -502,92 +602,132 @@ def write_analysis_results(results: Dict[str, Any], output_file):
         return
 
     with open(output_file, 'w') as f:
-        f.write(f"CUPTI Latency Analysis - Configuration: {config_name}\n")
+        f.write(f"CUPTI Performance Analysis - Configuration: {config_name}\n")
         f.write("=" * 80 + "\n")
 
+        # Configuration section
+        if results.get('configuration'):
+            f.write("CONFIGURATION\n")
+            f.write("-" * 20 + "\n")
+            config = results['configuration']
+            f.write(f"GPU ID: {config.get('gpu_id', 'unknown')}\n")
+            f.write(f"NUMA Node: {config.get('numa_node', 'unknown')}\n")
+            f.write(f"Test Type: {config.get('test_type', 'unknown')}\n")
+            if config.get('vit_depth', 0) > 0:
+                f.write(f"ViT Patch Size: {config.get('vit_patch_size', 'unknown')}\n")
+                f.write(f"ViT Depth: {config.get('vit_depth', 'unknown')}\n")
+                f.write(f"ViT Dimension: {config.get('vit_dim', 'unknown')}\n")
+            f.write("\n")
+
+        # Analysis scope
         if results['filtered_analysis']:
-            f.write("ANALYSIS SCOPE: test_double_buffer period only\n")
+            f.write("ANALYSIS SCOPE\n")
+            f.write("-" * 20 + "\n")
+            f.write("Scope: test_double_buffer period only\n")
             if results['test_time_range']:
                 start_ns, end_ns = results['test_time_range']
                 duration_ms = (end_ns - start_ns) / 1e6
-                f.write(f"Test period: {start_ns} - {end_ns} ns ({duration_ms:.2f} ms)\n")
+                f.write(f"Time range: {start_ns} - {end_ns} ns\n")
+                f.write(f"Duration: {duration_ms:.2f} ms\n")
         else:
-            f.write("ANALYSIS SCOPE: Entire trace\n")
+            f.write("ANALYSIS SCOPE\n")
+            f.write("-" * 20 + "\n")
+            f.write("Scope: Entire trace\n")
         f.write("\n")
 
-        # Primary latency hiding metrics
-        if results['temporal_compression_analysis']:
-            f.write("TEMPORAL COMPRESSION RATIO (PRIMARY LATENCY HIDING METRIC)\n")
-            f.write("-" * 50 + "\n")
-            tca = results['temporal_compression_analysis']
-            f.write(f"Timeline duration: {tca.get('total_timeline_ms', 0):.2f} ms\n")
-            f.write(f"GPU active time: {tca.get('total_active_ms', 0):.2f} ms\n")
-            f.write(f"GPU idle time: {tca.get('total_idle_ms', 0):.2f} ms\n")
-            f.write(f"TEMPORAL COMPRESSION RATIO: {tca.get('temporal_compression_ratio', 0):.3f} ({tca.get('temporal_compression_ratio', 0)*100:.1f}%)\n")
-            f.write(f"LATENCY HIDING EFFECTIVENESS: {tca.get('latency_hiding_effectiveness', 0):.3f}\n")
-            f.write(f"Active streams: {tca.get('active_streams', 0)}\n")
-            f.write(f"Average stream utilization: {tca.get('avg_stream_utilization', 0):.3f}\n")
-            f.write("\n")
-
-            # Interpretation
-            ratio = tca.get('temporal_compression_ratio', 0)
-            if ratio > 0.95:
-                f.write("INTERPRETATION: Excellent latency hiding! Temporal compression ratio is >95%.\n")
-            elif ratio > 0.85:
-                f.write("INTERPRETATION: Good latency hiding. Temporal compression ratio is >85%.\n")
-            elif ratio > 0.70:
-                f.write("INTERPRETATION: Moderate latency hiding. Some optimization possible.\n")
-            else:
-                f.write("INTERPRETATION: Poor latency hiding. Significant idle time detected.\n")
-            f.write("\n")
-
-        # Pipeline efficiency
-        if results['pipeline_efficiency']:
-            f.write("PIPELINE EFFICIENCY\n")
-            f.write("-" * 20 + "\n")
-            pe = results['pipeline_efficiency']
-            f.write(f"Total kernels executed: {pe.get('total_kernels', 0)}\n")
-            f.write(f"Average preparation time: {pe.get('avg_preparation_us', 0):.2f} μs (normal)\n")
-            f.write(f"Average execution time: {pe.get('avg_execution_ms', 0):.2f} ms\n")
-            f.write(f"Total gap time: {pe.get('total_gap_time_ms', 0):.2f} ms\n")
-            f.write(f"Significant gaps (>1μs): {pe.get('significant_gaps', 0)}\n")
-            f.write(f"PIPELINE EFFICIENCY: {pe.get('pipeline_efficiency', 0):.3f}\n")
-            f.write("\n")
-
-        # Stream analysis
-        if results['stream_analysis']:
-            f.write("STREAM EFFICIENCY ANALYSIS\n")
+        # Memory transfer performance
+        if results.get('memory_transfers') and 'error' not in results['memory_transfers']:
+            f.write("MEMORY TRANSFER PERFORMANCE\n")
             f.write("-" * 30 + "\n")
-            f.write(f"{'Stream':<8} {'Type':<12} {'Ops':<6} {'Active':<10} {'Idle':<10} {'Efficiency':<10} {'Idle %':<8}\n")
-            f.write(f"{'ID':<8} {'':<12} {'Count':<6} {'(ms)':<10} {'(ms)':<10} {'':<10} {'':<8}\n")
-            f.write("-" * 70 + "\n")
+            transfers = results['memory_transfers']
 
-            for stream in results['stream_analysis']:
-                stream_id = stream.get('streamId', 'N/A')
-                stream_type = stream.get('stream_type', 'unknown')
-                total_ops = (stream.get('kernel_count', 0) or 0) + (stream.get('memory_count', 0) or 0)
-                active_ms = stream.get('total_ops_ms', 0) or 0
-                idle_ms = stream.get('idle_time_ms', 0) or 0
-                efficiency = stream.get('stream_efficiency', 0) or 0
-                idle_pct = stream.get('idle_percentage', 0) or 0
+            for transfer_type, data in sorted(transfers.items()):
+                if transfer_type == 'h2d':
+                    f.write("Host-to-Device (H2D) Transfers:\n")
+                elif transfer_type == 'd2h':
+                    f.write("Device-to-Host (D2H) Transfers:\n")
+                else:
+                    f.write(f"{transfer_type.replace('_', ' ').title()} Transfers:\n")
 
-                f.write(f"{str(stream_id):<8} "
-                       f"{stream_type:<12} "
-                       f"{total_ops:<6} "
-                       f"{active_ms:<10.2f} "
-                       f"{idle_ms:<10.2f} "
-                       f"{efficiency:<10.3f} "
-                       f"{idle_pct*100:<8.1f}\n")
+                f.write(f"  Count: {data.get('transfer_count', 0) or 0}\n")
+                f.write(f"  Total bytes: {(data.get('total_bytes', 0) or 0) / (1024*1024):.2f} MB\n")
+                f.write(f"  Total time: {(data.get('total_duration_ns', 0) or 0) / 1e6:.2f} ms\n")
+                f.write(f"  Average bandwidth: {data.get('avg_bandwidth_mbps', 0) or 0:.2f} MB/s\n")
+                f.write(f"  Average duration: {(data.get('avg_duration_ns', 0) or 0) / 1e3:.2f} μs\n")
+                f.write(f"  Duration range: {(data.get('min_duration_ns', 0) or 0) / 1e3:.2f} - {(data.get('max_duration_ns', 0) or 0) / 1e3:.2f} μs\n")
+                f.write("\n")
+        elif results.get('memory_transfers', {}).get('error'):
+            f.write("MEMORY TRANSFER PERFORMANCE\n")
+            f.write("-" * 30 + "\n")
+            f.write(f"Error: {results['memory_transfers']['error']}\n\n")
+
+        # Compute performance
+        if results.get('compute_performance') and 'error' not in results['compute_performance']:
+            f.write("COMPUTE PERFORMANCE\n")
+            f.write("-" * 20 + "\n")
+            compute = results['compute_performance']
+            f.write(f"Total kernels: {compute.get('total_kernels', 0) or 0}\n")
+            f.write(f"Total compute time: {(compute.get('total_compute_time_ns', 0) or 0) / 1e6:.2f} ms\n")
+            f.write(f"Average kernel duration: {(compute.get('avg_kernel_duration_ns', 0) or 0) / 1e6:.2f} ms\n")
+            f.write(f"Kernel duration range: {(compute.get('min_kernel_duration_ns', 0) or 0) / 1e6:.2f} - {(compute.get('max_kernel_duration_ns', 0) or 0) / 1e6:.2f} ms\n")
+            if compute.get('total_timeline_ns'):
+                f.write(f"Compute timeline: {(compute.get('total_timeline_ns', 0) or 0) / 1e6:.2f} ms\n")
+                f.write(f"Compute utilization: {compute.get('compute_utilization', 0) or 0:.3f} ({(compute.get('compute_utilization', 0) or 0)*100:.1f}%)\n")
+            f.write("\n")
+
+        # Pipeline analysis
+        if results.get('pipeline_analysis') and 'error' not in results['pipeline_analysis']:
+            f.write("PIPELINE ANALYSIS (Per-Stream)\n")
+            f.write("-" * 20 + "\n")
+            pipeline = results['pipeline_analysis']
+            f.write(f"Pipeline kernels: {pipeline.get('total_kernels', 0)}\n")
+            f.write(f"Average preparation time: {pipeline.get('avg_preparation_us', 0):.2f} μs\n")
+            f.write(f"Average execution time: {pipeline.get('avg_execution_ms', 0):.2f} ms\n")
+            f.write(f"Total compute time: {pipeline.get('total_compute_time_ms', 0):.2f} ms\n")
+            f.write(f"Total timeline: {pipeline.get('total_timeline_ms', 0):.2f} ms\n")
+            f.write(f"Pipeline efficiency: {pipeline.get('pipeline_efficiency', 0):.3f} ({pipeline.get('pipeline_efficiency', 0)*100:.1f}%)\n")
+            f.write("\n")
+
+            # Gap statistics
+            f.write("Gap Statistics:\n")
+            f.write(f"  Total gaps: {pipeline.get('total_gaps', 0)}\n")
+            f.write(f"  Significant gaps (>1μs): {pipeline.get('significant_gaps_count', 0)}\n")
+            f.write(f"  Large gaps (>10μs): {pipeline.get('large_gaps_count', 0)}\n")
+            f.write(f"  Very large gaps (>100μs): {pipeline.get('very_large_gaps_count', 0)}\n")
+            f.write(f"  Total significant gap time: {pipeline.get('total_significant_gap_time_ns', 0) / 1e6:.2f} ms\n")
+            if pipeline.get('avg_gap_ns'):
+                f.write(f"  Average gap: {pipeline.get('avg_gap_ns', 0) / 1e3:.2f} μs\n")
+            if pipeline.get('max_gap_ns'):
+                f.write(f"  Maximum gap: {pipeline.get('max_gap_ns', 0) / 1e3:.2f} μs\n")
+
+            # Check for suspicious preparation time
+            prep_time_us = pipeline.get('avg_preparation_us', 0)
+            if prep_time_us > 50000:  # > 50ms seems suspicious
+                f.write(f"\nWarning: High preparation time ({prep_time_us:.0f} μs) may indicate timing issues.\n")
+            f.write("\n")
+
+        # Temporal compression ratio
+        if results.get('temporal_compression') and 'error' not in results['temporal_compression']:
+            f.write("TEMPORAL COMPRESSION ANALYSIS\n")
+            f.write("-" * 30 + "\n")
+            tcr = results['temporal_compression']
+            f.write(f"Timeline duration: {tcr.get('total_timeline_ms', 0):.2f} ms\n")
+            f.write(f"Total operation time (sequential): {tcr.get('total_active_ms', 0):.2f} ms\n")
+            f.write(f"Time saved through overlapping: {-tcr.get('total_idle_ms', 0):.2f} ms\n")
+            f.write(f"Temporal compression ratio: {tcr.get('temporal_compression_ratio', 0):.3f} ({tcr.get('temporal_compression_ratio', 0)*100:.1f}%)\n")
+            f.write(f"Total operations: {tcr.get('total_operations', 0)}\n")
+            f.write(f"Active streams: {tcr.get('active_streams', 0)}\n")
+            f.write(f"Average stream utilization: {tcr.get('avg_stream_utilization', 0):.3f} ({tcr.get('avg_stream_utilization', 0)*100:.1f}%)\n")
             f.write("\n")
 
 def main():
     parser = argparse.ArgumentParser(
-        description="SQLite CUPTI latency analyzer with safe error handling.",
-        epilog="This version measures temporal compression ratio and handles missing tables safely."
+        description="SQLite CUPTI performance analyzer with objective metrics.",
+        epilog="Provides comprehensive performance analysis without subjective interpretations."
     )
 
     parser.add_argument('sqlite_files', nargs='+', help='SQLite database files to analyze')
-    parser.add_argument('-o', '--output-dir', default='./nsys_analysis_results',
+    parser.add_argument('-o', '--output-dir', default='./performance_analysis_results',
                         help='Output directory for analysis results')
     parser.add_argument('--console-summary', action='store_true',
                         help='Print summary to console for each configuration')
@@ -599,7 +739,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir.absolute()}")
-    print("Using latency hiding metrics with safe error handling.")
+    print("Analyzing performance with objective metrics.")
 
     for i, sqlite_file in enumerate(args.sqlite_files, 1):
         sqlite_path = Path(sqlite_file)
@@ -616,31 +756,45 @@ def main():
             analyzer = SQLiteCUPTIAnalyzer(str(sqlite_path))
             results = analyzer.run_full_analysis(analyze_full_trace=args.include_warmup)
 
-            output_file = output_dir / f"{results['config_name']}.txt"
+            output_file = output_dir / f"{results['config_name']}_performance_analysis.txt"
             write_analysis_results(results, output_file)
             print(f"Results written to: {output_file}")
 
             if args.console_summary:
                 if 'error' in results:
                     print(f"  Error: {results['error']}")
-                elif results['temporal_compression_analysis']:
-                    tca = results['temporal_compression_analysis']
-                    ratio = tca.get('temporal_compression_ratio', 0)
-                    print(f"  Temporal Compression Ratio: {ratio:.3f} ({ratio*100:.1f}%)")
-                    print(f"  Latency Hiding: {'EXCELLENT' if ratio > 0.95 else 'GOOD' if ratio > 0.85 else 'MODERATE' if ratio > 0.70 else 'POOR'}")
+                else:
+                    # Print key metrics
+                    if results.get('configuration'):
+                        config = results['configuration']
+                        print(f"  GPU: {config.get('gpu_id', 'unknown')}, NUMA: {config.get('numa_node', 'unknown')}, Type: {config.get('test_type', 'unknown')}")
 
-                if results.get('pipeline_efficiency'):
-                    pe = results['pipeline_efficiency']
-                    efficiency = pe.get('pipeline_efficiency', 0)
-                    print(f"  Pipeline Efficiency: {efficiency:.3f}")
+                    if results.get('temporal_compression'):
+                        tcr = results['temporal_compression']
+                        ratio = tcr.get('temporal_compression_ratio', 0)
+                        print(f"  Temporal Compression Ratio: {ratio:.3f} ({ratio*100:.1f}%)")
+
+                    if results.get('memory_transfers'):
+                        transfers = results['memory_transfers']
+                        if 'h2d' in transfers:
+                            h2d_bw = transfers['h2d'].get('avg_bandwidth_mbps', 0)
+                            print(f"  H2D Bandwidth: {h2d_bw:.1f} MB/s")
+                        if 'd2h' in transfers:
+                            d2h_bw = transfers['d2h'].get('avg_bandwidth_mbps', 0)
+                            print(f"  D2H Bandwidth: {d2h_bw:.1f} MB/s")
+
+                    if results.get('compute_performance'):
+                        compute = results['compute_performance']
+                        kernels = compute.get('total_kernels', 0)
+                        util = compute.get('compute_utilization', 0)
+                        print(f"  Kernels: {kernels}, Compute Utilization: {util:.3f}")
 
         except Exception as e:
             print(f"Error processing {sqlite_file}: {e}")
             import traceback
             traceback.print_exc()
 
-    print(f"\nCompleted analysis. Results saved in: {output_dir}")
+    print(f"\nCompleted performance analysis. Results saved in: {output_dir}")
 
 if __name__ == '__main__':
     main()
-
