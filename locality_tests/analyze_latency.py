@@ -446,7 +446,7 @@ class SQLiteCUPTIAnalyzer:
                 return None
 
     def run_full_analysis(self, analyze_full_trace: bool = False) -> Dict[str, Any]:
-        """Run corrected latency hiding analysis with safe error handling."""
+        """Run latency hiding analysis with safe error handling."""
         print(f"Analyzing configuration: {self.config_name}")
 
         # Check if we have minimum required tables
@@ -491,7 +491,7 @@ class SQLiteCUPTIAnalyzer:
         return results
 
 def write_analysis_results(results: Dict[str, Any], output_file):
-    """Write corrected analysis results."""
+    """Write analysis results."""
     config_name = results['config_name']
 
     if 'error' in results:
@@ -583,11 +583,11 @@ def write_analysis_results(results: Dict[str, Any], output_file):
 def main():
     parser = argparse.ArgumentParser(
         description="SQLite CUPTI latency analyzer with safe error handling.",
-        epilog="This version correctly measures temporal compression ratio and handles missing tables safely."
+        epilog="This version measures temporal compression ratio and handles missing tables safely."
     )
 
     parser.add_argument('sqlite_files', nargs='+', help='SQLite database files to analyze')
-    parser.add_argument('-o', '--output-dir', default='./corrected_analysis_results',
+    parser.add_argument('-o', '--output-dir', default='./nsys_analysis_results',
                         help='Output directory for analysis results')
     parser.add_argument('--console-summary', action='store_true',
                         help='Print summary to console for each configuration')
@@ -616,7 +616,7 @@ def main():
             analyzer = SQLiteCUPTIAnalyzer(str(sqlite_path))
             results = analyzer.run_full_analysis(analyze_full_trace=args.include_warmup)
 
-            output_file = output_dir / f"{results['config_name']}_corrected_analysis.txt"
+            output_file = output_dir / f"{results['config_name']}.txt"
             write_analysis_results(results, output_file)
             print(f"Results written to: {output_file}")
 
@@ -639,7 +639,7 @@ def main():
             import traceback
             traceback.print_exc()
 
-    print(f"\nCompleted corrected analysis. Results saved in: {output_dir}")
+    print(f"\nCompleted analysis. Results saved in: {output_dir}")
 
 if __name__ == '__main__':
     main()
