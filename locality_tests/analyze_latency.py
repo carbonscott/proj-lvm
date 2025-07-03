@@ -179,9 +179,9 @@ class SQLiteCUPTIAnalyzer:
             except sqlite3.OperationalError:
                 return False
 
-    def analyze_gpu_utilization(self) -> Dict[str, Any]:
+    def analyze_temporal_compression_ratio(self) -> Dict[str, Any]:
         """
-        Analyze actual GPU utilization and idle time.
+        Analyze actual temporal compression ratio and idle time.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -253,7 +253,7 @@ class SQLiteCUPTIAnalyzer:
                 (t.last_op_end - t.first_op_start) / 1e6 as total_timeline_ms,
                 t.total_active_time / 1e6 as total_active_ms,
                 ((t.last_op_end - t.first_op_start) - t.total_active_time) / 1e6 as total_idle_ms,
-                t.total_active_time / CAST(t.last_op_end - t.first_op_start AS FLOAT) as gpu_utilization,
+                t.total_active_time / CAST(t.last_op_end - t.first_op_start AS FLOAT) as temporal_compression_ratio,
                 t.total_operations,
                 (SELECT COUNT(*) FROM stream_stats) as active_streams,
                 (SELECT AVG(stream_active_time / CAST(stream_end - stream_start AS FLOAT)) FROM stream_stats) as avg_stream_utilization,
@@ -271,7 +271,7 @@ class SQLiteCUPTIAnalyzer:
                         'total_timeline_ms': result[2],
                         'total_active_ms': result[3],
                         'total_idle_ms': result[4],
-                        'gpu_utilization': result[5],
+                        'temporal_compression_ratio': result[5],
                         'total_operations': result[6],
                         'active_streams': result[7],
                         'avg_stream_utilization': result[8] or 0,
@@ -280,7 +280,7 @@ class SQLiteCUPTIAnalyzer:
                     }
                 return {}
             except sqlite3.OperationalError as e:
-                print(f"Database error in GPU utilization analysis: {e}")
+                print(f"Database error in temporal compression ratio analysis: {e}")
                 return {}
 
     def analyze_stream_overlap(self) -> List[Dict[str, Any]]:
@@ -469,8 +469,8 @@ class SQLiteCUPTIAnalyzer:
         table_info = self.get_table_info()
         print(f"Tables found: {table_info}")
 
-        print("Analyzing GPU utilization (primary latency hiding metric)...")
-        gpu_utilization = self.analyze_gpu_utilization()
+        print("Analyzing temporal compression ratio (primary latency hiding metric)...")
+        temporal_compression_analysis = self.analyze_temporal_compression_ratio()
 
         print("Analyzing stream efficiency...")
         stream_analysis = self.analyze_stream_overlap()
@@ -483,7 +483,7 @@ class SQLiteCUPTIAnalyzer:
             'test_time_range': self.test_time_range,
             'filtered_analysis': found_test_range,
             'table_info': table_info,
-            'gpu_utilization': gpu_utilization,
+            'temporal_compression_analysis': temporal_compression_analysis,
             'stream_analysis': stream_analysis,
             'pipeline_efficiency': pipeline_efficiency
         }
@@ -516,26 +516,26 @@ def write_analysis_results(results: Dict[str, Any], output_file):
         f.write("\n")
 
         # Primary latency hiding metrics
-        if results['gpu_utilization']:
-            f.write("GPU UTILIZATION (PRIMARY LATENCY HIDING METRIC)\n")
+        if results['temporal_compression_analysis']:
+            f.write("TEMPORAL COMPRESSION RATIO (PRIMARY LATENCY HIDING METRIC)\n")
             f.write("-" * 50 + "\n")
-            gu = results['gpu_utilization']
-            f.write(f"Timeline duration: {gu.get('total_timeline_ms', 0):.2f} ms\n")
-            f.write(f"GPU active time: {gu.get('total_active_ms', 0):.2f} ms\n")
-            f.write(f"GPU idle time: {gu.get('total_idle_ms', 0):.2f} ms\n")
-            f.write(f"GPU UTILIZATION: {gu.get('gpu_utilization', 0):.3f} ({gu.get('gpu_utilization', 0)*100:.1f}%)\n")
-            f.write(f"LATENCY HIDING EFFECTIVENESS: {gu.get('latency_hiding_effectiveness', 0):.3f}\n")
-            f.write(f"Active streams: {gu.get('active_streams', 0)}\n")
-            f.write(f"Average stream utilization: {gu.get('avg_stream_utilization', 0):.3f}\n")
+            tca = results['temporal_compression_analysis']
+            f.write(f"Timeline duration: {tca.get('total_timeline_ms', 0):.2f} ms\n")
+            f.write(f"GPU active time: {tca.get('total_active_ms', 0):.2f} ms\n")
+            f.write(f"GPU idle time: {tca.get('total_idle_ms', 0):.2f} ms\n")
+            f.write(f"TEMPORAL COMPRESSION RATIO: {tca.get('temporal_compression_ratio', 0):.3f} ({tca.get('temporal_compression_ratio', 0)*100:.1f}%)\n")
+            f.write(f"LATENCY HIDING EFFECTIVENESS: {tca.get('latency_hiding_effectiveness', 0):.3f}\n")
+            f.write(f"Active streams: {tca.get('active_streams', 0)}\n")
+            f.write(f"Average stream utilization: {tca.get('avg_stream_utilization', 0):.3f}\n")
             f.write("\n")
 
             # Interpretation
-            util = gu.get('gpu_utilization', 0)
-            if util > 0.95:
-                f.write("INTERPRETATION: Excellent latency hiding! GPU is >95% utilized.\n")
-            elif util > 0.85:
-                f.write("INTERPRETATION: Good latency hiding. GPU is >85% utilized.\n")
-            elif util > 0.70:
+            ratio = tca.get('temporal_compression_ratio', 0)
+            if ratio > 0.95:
+                f.write("INTERPRETATION: Excellent latency hiding! Temporal compression ratio is >95%.\n")
+            elif ratio > 0.85:
+                f.write("INTERPRETATION: Good latency hiding. Temporal compression ratio is >85%.\n")
+            elif ratio > 0.70:
                 f.write("INTERPRETATION: Moderate latency hiding. Some optimization possible.\n")
             else:
                 f.write("INTERPRETATION: Poor latency hiding. Significant idle time detected.\n")
@@ -583,7 +583,7 @@ def write_analysis_results(results: Dict[str, Any], output_file):
 def main():
     parser = argparse.ArgumentParser(
         description="SQLite CUPTI latency analyzer with safe error handling.",
-        epilog="This version correctly measures GPU utilization and handles missing tables safely."
+        epilog="This version correctly measures temporal compression ratio and handles missing tables safely."
     )
 
     parser.add_argument('sqlite_files', nargs='+', help='SQLite database files to analyze')
@@ -623,11 +623,11 @@ def main():
             if args.console_summary:
                 if 'error' in results:
                     print(f"  Error: {results['error']}")
-                elif results['gpu_utilization']:
-                    gu = results['gpu_utilization']
-                    util = gu.get('gpu_utilization', 0)
-                    print(f"  GPU Utilization: {util:.3f} ({util*100:.1f}%)")
-                    print(f"  Latency Hiding: {'EXCELLENT' if util > 0.95 else 'GOOD' if util > 0.85 else 'MODERATE' if util > 0.70 else 'POOR'}")
+                elif results['temporal_compression_analysis']:
+                    tca = results['temporal_compression_analysis']
+                    ratio = tca.get('temporal_compression_ratio', 0)
+                    print(f"  Temporal Compression Ratio: {ratio:.3f} ({ratio*100:.1f}%)")
+                    print(f"  Latency Hiding: {'EXCELLENT' if ratio > 0.95 else 'GOOD' if ratio > 0.85 else 'MODERATE' if ratio > 0.70 else 'POOR'}")
 
                 if results.get('pipeline_efficiency'):
                     pe = results['pipeline_efficiency']
