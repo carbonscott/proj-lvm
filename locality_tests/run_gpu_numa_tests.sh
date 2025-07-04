@@ -18,6 +18,7 @@ WARMUP_SAMPLES=100
 MEMORY_SIZE_MB=512
 TIMEOUT_S=600
 NSYS_REPORT_DIR="nsys_reports"
+COMPILE_MODEL=false
 
 print_header() {
     echo -e "${GREEN}================================${NC}"
@@ -155,6 +156,17 @@ check_dependencies() {
         echo "  pip install vit-pytorch"
     fi
 
+    # Check for torch.compile availability if compilation is enabled
+    if [ "$COMPILE_MODEL" = true ]; then
+        python3 -c "import torch; assert hasattr(torch, 'compile'), 'torch.compile not available'" 2>/dev/null
+        if [ $? -ne 0 ]; then
+            print_error "torch.compile is not available. Requires PyTorch 2.0+."
+            echo "Either upgrade PyTorch or run without --compile-model"
+            exit 1
+        fi
+        print_info "torch.compile is available - will use model compilation"
+    fi
+
     echo "All dependencies satisfied."
 }
 
@@ -186,10 +198,17 @@ run_gpu_pipeline_test() {
     local dim=$6
     local mlp_dim=$7
 
+    local compile_flag=""
+    local compile_suffix=""
+    if [ "$COMPILE_MODEL" = true ]; then
+        compile_flag="--compile-model"
+        compile_suffix=" [COMPILED]"
+    fi
+
     if [ $depth -eq 0 ]; then
-        local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (No-op: H2D/D2H only)"
+        local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (No-op: H2D/D2H only)${compile_suffix}"
     else
-        local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (ViT: ${patch_size}/${depth}/${heads}/${dim}/${mlp_dim})"
+        local test_name="GPU Pipeline Test: GPU${gpu_id} on NUMA${numa_node} (ViT: ${patch_size}/${depth}/${heads}/${dim}/${mlp_dim})${compile_suffix}"
     fi
 
     print_test "$test_name"
@@ -215,6 +234,11 @@ run_gpu_pipeline_test() {
         local nsys_output="${NSYS_REPORT_DIR}/pipeline_gpu${gpu_id}_numa${numa_node}_vit${patch_size}x${depth}x${dim}"
     fi
 
+    # Add compilation suffix to report name if enabled
+    if [ "$COMPILE_MODEL" = true ]; then
+        nsys_output="${nsys_output}_compiled"
+    fi
+
     timeout $TIMEOUT_S nsys profile -o "$nsys_output" --trace=cuda,nvtx \
         numactl --cpunodebind=$numa_node --membind=$numa_node \
         python3 gpu_numa_pipeline_test.py \
@@ -228,7 +252,8 @@ run_gpu_pipeline_test() {
         --vit-depth $depth \
         --vit-heads $heads \
         --vit-dim $dim \
-        --vit-mlp-dim $mlp_dim
+        --vit-mlp-dim $mlp_dim \
+        $compile_flag
 
     local exit_code=$?
 
@@ -251,6 +276,7 @@ run_all_pipeline_tests() {
 
     echo "Available NUMA nodes: ${available_nodes[@]}"
     echo "Available GPUs: ${available_gpus[@]}"
+    echo "Model compilation: $COMPILE_MODEL"
     echo ""
 
     if [ ${#available_nodes[@]} -lt 1 ]; then
@@ -311,6 +337,7 @@ run_focused_tests() {
     fi
 
     echo "Testing GPU $gpu_id with NUMA nodes: ${test_nodes[@]}"
+    echo "Model compilation: $COMPILE_MODEL"
     echo ""
 
     # Run pipeline tests with focused ViT configurations
@@ -384,6 +411,11 @@ validate_gpu_numa_setup() {
         echo "- Pipeline tests: Ready (${#available_gpus[@]} GPUs × ${#available_nodes[@]} NUMA nodes)"
         echo "  * No-op mode (depth=0): Pure H2D/D2H performance"
         echo "  * ViT modes (depth>0): Compute + memory transfer pipeline"
+        if [ "$COMPILE_MODEL" = true ]; then
+            echo "  * Model compilation: ENABLED (reduced kernel overhead)"
+        else
+            echo "  * Model compilation: DISABLED (add --compile-model to enable)"
+        fi
 
         # Suggest interesting test cases
         echo ""
@@ -416,15 +448,17 @@ usage() {
     echo "  -m MEMORY_MB        Memory pool size in MB (default: $MEMORY_SIZE_MB)"
     echo "  -r NSYS_DIR         NSYS reports directory (default: $NSYS_REPORT_DIR)"
     echo "  -t TIMEOUT_S        Test timeout in seconds (default: $TIMEOUT_S)"
+    echo "  -c, --compile-model Enable torch.compile for reduced kernel overhead"
     echo "  -h                  Show this help"
     echo ""
     echo "Examples:"
     echo "  $0                              # Run all pipeline tests (including no-op)"
     echo "  $0 pipeline                     # Run pipeline tests"
+    echo "  $0 --compile-model pipeline     # Run pipeline tests with model compilation"
     echo "  $0 validate                     # Check GPU-NUMA setup"
     echo "  $0 focused 3                    # Run focused tests for GPU 3"
     echo "  $0 focused 3 0,2                # Test GPU 3 with NUMA nodes 0,2"
-    echo "  $0 -n 2000 pipeline            # Custom parameters"
+    echo "  $0 -n 2000 -c pipeline         # Custom parameters with compilation"
     echo "  $0 -r my_reports pipeline       # Custom nsys output directory"
     echo ""
     echo "ViT Pipeline Configurations:"
@@ -433,10 +467,15 @@ usage() {
     echo "  Medium compute: patch_size=32, depth=6, dim=512  (balanced)"
     echo "  Heavy compute:  patch_size=16, depth=8, dim=768  (compute dominates)"
     echo "  Very Heavy:     patch_size=16, depth=12, dim=1024 (compute-bound)"
+    echo ""
+    echo "Model Compilation (torch.compile):"
+    echo "  - Reduces CUDA kernel overhead, especially beneficial for small ViTs"
+    echo "  - Requires PyTorch 2.0+ and may increase first-run compilation time"
+    echo "  - Most effective for depth=4-8 models where kernel overhead is significant"
 }
 
-# Parse command line arguments
-while getopts "n:s:b:w:m:r:t:h" opt; do
+# Parse command line arguments - FIXED VERSION
+while getopts "n:s:b:w:m:r:t:ch" opt; do
     case $opt in
         n)
             NUM_SAMPLES=$OPTARG
@@ -459,6 +498,9 @@ while getopts "n:s:b:w:m:r:t:h" opt; do
         t)
             TIMEOUT_S=$OPTARG
             ;;
+        c)
+            COMPILE_MODEL=true
+            ;;
         h)
             usage
             exit 0
@@ -472,6 +514,25 @@ while getopts "n:s:b:w:m:r:t:h" opt; do
 done
 
 shift $((OPTIND-1))
+
+# Handle long options manually (since getopts doesn't support them)
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --compile-model)
+            COMPILE_MODEL=true
+            shift
+            ;;
+        -*)
+            echo "Unknown option $1"
+            usage
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 TEST_TYPE=${1:-pipeline}
 
 # Main execution
@@ -491,7 +552,7 @@ case $TEST_TYPE in
         run_all_pipeline_tests
         ;;
     focused)
-        if [ $# -lt 1 ]; then
+        if [ $# -lt 2 ]; then
             print_error "GPU ID required for focused tests"
             usage
             exit 1
@@ -515,3 +576,8 @@ echo "NSYS reports saved in: $NSYS_REPORT_DIR/"
 echo "For detailed analysis, use nsys to profile the generated .nsys-rep files:"
 echo "  nsys stats $NSYS_REPORT_DIR/*.nsys-rep"
 echo "  nsys-ui $NSYS_REPORT_DIR/*.nsys-rep  # For GUI analysis"
+if [ "$COMPILE_MODEL" = true ]; then
+    echo ""
+    echo "Model compilation was ENABLED. Reports include '_compiled' suffix."
+    echo "Compare with non-compiled runs to measure kernel overhead reduction."
+fi

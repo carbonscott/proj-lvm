@@ -27,6 +27,17 @@ except ImportError:
     print("ERROR: vit-pytorch not found. Please install with: pip install vit-pytorch")
     sys.exit(1)
 
+def check_torch_compile_available():
+    """Check if torch.compile is available (PyTorch 2.0+)"""
+    try:
+        import torch
+        if hasattr(torch, 'compile'):
+            return True
+        else:
+            return False
+    except:
+        return False
+
 def get_numa_info():
     """Get current process NUMA binding info"""
     try:
@@ -92,7 +103,7 @@ def get_gpu_info(gpu_id):
     except Exception as e:
         return {'error': str(e)}
 
-def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id):
+def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id, compile_model=False):
     """Create ViT model for compute simulation, or None for no-op"""
     C, H, W = tensor_shape
 
@@ -123,12 +134,24 @@ def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_i
     # Set to eval mode for consistent inference timing
     vit_model.eval()
 
+    # Add torch.compile if requested and available
+    if compile_model and check_torch_compile_available():
+        print(f"Compiling ViT model (depth={depth}, dim={dim}) for reduced kernel overhead...")
+        try:
+            # Use default backend and mode for best compatibility
+            vit_model = torch.compile(vit_model, mode='default')
+            print("Model compilation successful")
+        except Exception as e:
+            print(f"Warning: Model compilation failed ({e}), using non-compiled model")
+    elif compile_model and not check_torch_compile_available():
+        print("Warning: torch.compile not available (requires PyTorch 2.0+), using non-compiled model")
+
     return vit_model, image_size
 
 class DoubleBufferedPipeline:
     """Double buffered pipeline for H2D -> ViT Compute -> D2H"""
 
-    def __init__(self, batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory=True):
+    def __init__(self, batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory=True, compile_model=False):
         self.batch_size = batch_size
         self.tensor_shape = tensor_shape
         self.gpu_id = gpu_id
@@ -148,9 +171,9 @@ class DoubleBufferedPipeline:
         for ev in self.d2h_done_event.values():
             ev.record()  # Record on default stream makes them signaled immediately
 
-        # Create ViT model (or None for no-op)
+        # Create ViT model (or None for no-op) - NOW WITH COMPILATION SUPPORT
         self.vit_model, self.image_size = create_vit_model(
-            tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id
+            tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id, compile_model
         )
         self.is_noop = (self.vit_model is None)
 
@@ -277,7 +300,8 @@ def run_pipeline_test(
     deterministic=False,
     pin_memory=True,
     fill_pattern='random',
-    sync_frequency=10
+    sync_frequency=10,
+    compile_model=False
 ):
     """
     Run comprehensive pipeline performance test with double buffering
@@ -314,6 +338,7 @@ def run_pipeline_test(
     print(f"Pin Memory: {pin_memory}")
     print(f"Sync Frequency: {sync_frequency}")
     print(f"Deterministic: {deterministic}")
+    print(f"Compile Model: {compile_model}")
     print("=" * 60)
 
     # Check vit-pytorch availability for non-no-op mode
@@ -367,9 +392,9 @@ def run_pipeline_test(
     # Free memory pool after warmup to save RAM
     del memory_pool
 
-    # Create pipeline
+    # Create pipeline - NOW WITH COMPILATION SUPPORT
     pipeline = DoubleBufferedPipeline(
-        batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory
+        batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory, compile_model
     )
 
     # Warmup phase
@@ -519,6 +544,10 @@ def main():
     parser.add_argument('--fill-pattern', choices=['random', 'sequential', 'zeros'], default='random',
                         help='Memory fill pattern (default: random)')
 
+    # Compilation option
+    parser.add_argument('--compile-model', action='store_true',
+                        help='Enable torch.compile for reduced kernel overhead (requires PyTorch 2.0+)')
+
     # Profiling and automation
     parser.add_argument('--nsys-report', type=str, default=None,
                         help='NSYS report name for automation (deprecated - handled by shell script)')
@@ -541,7 +570,8 @@ def main():
         deterministic=args.deterministic,
         pin_memory=not args.no_pin_memory,
         fill_pattern=args.fill_pattern,
-        sync_frequency=args.sync_frequency
+        sync_frequency=args.sync_frequency,
+        compile_model=args.compile_model
     )
 
 if __name__ == '__main__':
