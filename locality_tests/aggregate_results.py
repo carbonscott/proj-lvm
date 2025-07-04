@@ -64,6 +64,12 @@ class PerformanceAnalysisParser:
                 elif key == 'ViT Dimension':
                     config['vit_dim'] = int(value) if value.isdigit() else value
 
+        # For H2D/D2H Only tests, set ViT config to N/A
+        if config.get('test_type') == 'H2D/D2H Only':
+            config['vit_patch_size'] = 'N/A'
+            config['vit_depth'] = 'N/A'
+            config['vit_dim'] = 'N/A'
+
         return config
 
     def _parse_memory_transfers(self, content: str) -> Dict[str, Any]:
@@ -153,7 +159,10 @@ class PerformanceAnalysisParser:
         """Parse PIPELINE ANALYSIS section."""
         pipeline = {}
 
-        section = self._extract_section(content, 'PIPELINE ANALYSIS')
+        # Try both possible section names
+        section = self._extract_section(content, 'PIPELINE ANALYSIS (Per-Stream)')
+        if not section:
+            section = self._extract_section(content, 'PIPELINE ANALYSIS')
         if not section:
             return pipeline
 
@@ -256,9 +265,10 @@ def write_csv_tables(parsed_data: List[Dict[str, Any]], output_dir: Path):
     # Memory Transfer Performance Table
     memory_file = output_dir / 'memory_transfer_performance.csv'
     memory_headers = [
-        'config', 'gpu', 'numa', 'test_type',
+        'gpu', 'numa', 'test_type', 'vit_patch_size', 'vit_depth', 'vit_dim',
         'h2d_count', 'h2d_total_mb', 'h2d_bandwidth_mbps', 'h2d_avg_us',
-        'd2h_count', 'd2h_total_mb', 'd2h_bandwidth_mbps', 'd2h_avg_us'
+        'd2h_count', 'd2h_total_mb', 'd2h_bandwidth_mbps', 'd2h_avg_us',
+        'source_file'
     ]
 
     with open(memory_file, 'w', newline='') as f:
@@ -269,6 +279,7 @@ def write_csv_tables(parsed_data: List[Dict[str, Any]], output_dir: Path):
             row = {}
             row.update(data['config'])
             row.update(data['memory'])
+            row['source_file'] = Path(data['source_file']).name
             # Fill missing fields with empty values
             for header in memory_headers:
                 if header not in row:
@@ -278,9 +289,10 @@ def write_csv_tables(parsed_data: List[Dict[str, Any]], output_dir: Path):
     # Compute Performance Table
     compute_file = output_dir / 'compute_performance.csv'
     compute_headers = [
-        'config', 'gpu', 'numa', 'test_type',
+        'gpu', 'numa', 'test_type', 'vit_patch_size', 'vit_depth', 'vit_dim',
         'total_kernels', 'total_compute_ms', 'avg_kernel_ms',
-        'compute_timeline_ms', 'compute_utilization'
+        'compute_timeline_ms', 'compute_utilization',
+        'source_file'
     ]
 
     with open(compute_file, 'w', newline='') as f:
@@ -291,14 +303,16 @@ def write_csv_tables(parsed_data: List[Dict[str, Any]], output_dir: Path):
             row = {}
             row.update(data['config'])
             row.update(data['compute'])
+            row['source_file'] = Path(data['source_file']).name
             writer.writerow({k: row.get(k, '') for k in compute_headers})
 
     # Pipeline Analysis Table
     pipeline_file = output_dir / 'pipeline_analysis.csv'
     pipeline_headers = [
-        'config', 'gpu', 'numa', 'test_type',
+        'gpu', 'numa', 'test_type', 'vit_patch_size', 'vit_depth', 'vit_dim',
         'pipeline_kernels', 'avg_prep_us', 'pipeline_efficiency',
-        'significant_gaps', 'total_gap_ms', 'max_gap_us'
+        'significant_gaps', 'total_gap_ms', 'max_gap_us',
+        'source_file'
     ]
 
     with open(pipeline_file, 'w', newline='') as f:
@@ -309,14 +323,16 @@ def write_csv_tables(parsed_data: List[Dict[str, Any]], output_dir: Path):
             row = {}
             row.update(data['config'])
             row.update(data['pipeline'])
+            row['source_file'] = Path(data['source_file']).name
             writer.writerow({k: row.get(k, '') for k in pipeline_headers})
 
     # Temporal Compression Analysis Table
     temporal_file = output_dir / 'temporal_compression_analysis.csv'
     temporal_headers = [
-        'config', 'gpu', 'numa', 'test_type',
+        'gpu', 'numa', 'test_type', 'vit_patch_size', 'vit_depth', 'vit_dim',
         'timeline_ms', 'total_operation_ms', 'time_saved_ms',
-        'compression_ratio', 'active_streams', 'avg_stream_util'
+        'compression_ratio', 'active_streams', 'avg_stream_util',
+        'source_file'
     ]
 
     with open(temporal_file, 'w', newline='') as f:
@@ -327,6 +343,7 @@ def write_csv_tables(parsed_data: List[Dict[str, Any]], output_dir: Path):
             row = {}
             row.update(data['config'])
             row.update(data['temporal'])
+            row['source_file'] = Path(data['source_file']).name
             writer.writerow({k: row.get(k, '') for k in temporal_headers})
 
 
@@ -377,6 +394,7 @@ Examples:
         try:
             parser = PerformanceAnalysisParser(file_path)
             data = parser.parse_file()
+            data['source_file'] = file_path  # Add source file info
             parsed_data.append(data)
         except Exception as e:
             print(f"Error parsing {file_path}: {e}")
