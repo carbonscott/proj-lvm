@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-GPU NUMA Pipeline Test with ViT and Double Buffering
+GPU NUMA Pipeline Test with ViT and Double Buffering - EVENT-BASED SYNC VERSION
 
 Test script to evaluate end-to-end pipeline performance with overlapping
 H2D, Compute, and D2H stages using double buffering across NUMA nodes.
+
+This version uses fine-grained CUDA events for synchronization instead of
+stream dependencies for better parallelism and performance.
 
 Usage with numactl:
   numactl --cpunodebind=0 --membind=0 python gpu_numa_pipeline_test.py --gpu-id=5
@@ -162,14 +165,23 @@ class DoubleBufferedPipeline:
         self.compute_stream = torch.cuda.Stream(device=gpu_id)
         self.d2h_stream = torch.cuda.Stream(device=gpu_id)
 
-        # CUDA events for per-buffer D2H completion (fine-grained synchronization)
+        # CUDA events for fine-grained synchronization between all pipeline stages
+        self.h2d_done_event = {
+            'A': torch.cuda.Event(enable_timing=False),
+            'B': torch.cuda.Event(enable_timing=False)
+        }
+        self.compute_done_event = {
+            'A': torch.cuda.Event(enable_timing=False),
+            'B': torch.cuda.Event(enable_timing=False)
+        }
         self.d2h_done_event = {
             'A': torch.cuda.Event(enable_timing=False),
             'B': torch.cuda.Event(enable_timing=False)
         }
-        # Prime both events so wait_event() never deadlocks on first use
-        for ev in self.d2h_done_event.values():
-            ev.record()  # Record on default stream makes them signaled immediately
+        # Prime all events so wait_event() never deadlocks on first use
+        for events in [self.h2d_done_event, self.compute_done_event, self.d2h_done_event]:
+            for ev in events.values():
+                ev.record()  # Record on default stream makes them signaled immediately
 
         # Create ViT model (or None for no-op) - NOW WITH COMPILATION SUPPORT
         self.vit_model, self.image_size = create_vit_model(
@@ -202,6 +214,7 @@ class DoubleBufferedPipeline:
         """Perform H2D transfer with fine-grained event-based synchronization"""
         gpu_buffer = self.gpu_buffers[self.current]
         d2h_event = self.d2h_done_event[self.current]
+        h2d_event = self.h2d_done_event[self.current]
 
         with torch.cuda.stream(self.h2d_stream):
             with nvtx.range(f"{nvtx_prefix}_h2d_batch_{batch_idx}"):
@@ -223,15 +236,20 @@ class DoubleBufferedPipeline:
                         gpu_buffer[i].copy_(resized_tensor, non_blocking=True)
                     else:
                         gpu_buffer[i].copy_(tensor, non_blocking=True)
+                
+                # Record H2D completion event for this specific buffer
+                self.h2d_stream.record_event(h2d_event)
 
     def compute_workload(self, batch_idx, current_batch_size, nvtx_prefix):
         """Perform compute workload: ViT inference or no-op"""
         gpu_buffer = self.gpu_buffers[self.current]
+        h2d_event = self.h2d_done_event[self.current]
+        compute_event = self.compute_done_event[self.current]
 
         with torch.cuda.stream(self.compute_stream):
             with nvtx.range(f"{nvtx_prefix}_compute_batch_{batch_idx}"):
-                # Wait for H2D to complete
-                self.compute_stream.wait_stream(self.h2d_stream)
+                # EVENT-BASED: Wait only for THIS buffer's H2D completion
+                self.compute_stream.wait_event(h2d_event)
 
                 if self.is_noop:
                     # No-op compute: minimal operation for stream ordering
@@ -248,17 +266,21 @@ class DoubleBufferedPipeline:
                             predictions = self.vit_model(valid_gpu_slice)
                             # Force compute completion with a small operation
                             _ = predictions.sum()
+                
+                # Record compute completion event for this specific buffer
+                self.compute_stream.record_event(compute_event)
 
     def d2h_transfer(self, batch_idx, current_batch_size, nvtx_prefix):
         """Perform D2H transfer from current buffer (only valid slice)"""
         gpu_buffer = self.gpu_buffers[self.current]
         cpu_buffer = self.cpu_buffers[self.current]
+        compute_event = self.compute_done_event[self.current]
         d2h_event = self.d2h_done_event[self.current]
 
         with torch.cuda.stream(self.d2h_stream):
             with nvtx.range(f"{nvtx_prefix}_d2h_batch_{batch_idx}"):
-                # Wait for compute to complete
-                self.d2h_stream.wait_stream(self.compute_stream)
+                # EVENT-BASED: Wait only for THIS buffer's compute completion
+                self.d2h_stream.wait_event(compute_event)
 
                 # Copy back only the valid slice
                 for i in range(current_batch_size):
@@ -275,7 +297,7 @@ class DoubleBufferedPipeline:
                     else:
                         cpu_buffer[i].copy_(gpu_tensor, non_blocking=True)
 
-                # Record completion event for this specific buffer
+                # Record D2H completion event for this specific buffer
                 self.d2h_stream.record_event(d2h_event)
 
     def wait_for_completion(self):
