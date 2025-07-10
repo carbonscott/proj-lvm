@@ -25,6 +25,7 @@ import os
 # Check for vit-pytorch availability
 try:
     from vit_pytorch import ViT
+    from vit_utils import ViTForProfiling
     VIT_AVAILABLE = True
 except ImportError:
     print("ERROR: vit-pytorch not found. Please install with: pip install vit-pytorch")
@@ -120,8 +121,8 @@ def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_i
         print("No-op compute mode: depth=0, skipping ViT model creation")
         return None, image_size
 
-    # Normal ViT creation
-    vit_model = ViT(
+    # Normal ViT creation - using ViTForProfiling for larger D2H transfers
+    vit_model = ViTForProfiling(
         image_size=image_size,
         patch_size=patch_size,
         num_classes=1000,  # Standard ImageNet classes
