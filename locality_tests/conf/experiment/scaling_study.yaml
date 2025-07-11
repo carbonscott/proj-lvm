@@ -1,0 +1,88 @@
+# @package _global_
+# Model Scaling Study Configuration
+
+experiment:
+  name: "model_scaling_study"
+  description: "Systematic study of model complexity scaling effects on pipeline performance"
+  max_workers: 4
+  resume: true
+
+  test:
+    num_samples: 2000
+    batch_size: 10
+    warmup_samples: 200
+    memory_size_mb: 1024
+    tensor_shape: [3, 224, 224]
+    compile_model: false
+    timeout_s: 900
+
+  hardware:
+    gpu_ids: [0]  # Single GPU for clean scaling analysis
+    numa_nodes: [0]  # Use local NUMA node for best performance baseline
+
+  # Systematic scaling of model parameters
+  vit_configs:
+    # Scaling depth (transformer layers) - fixed other params
+    - name: "depth_scale_d2"
+      patch_size: 32
+      depth: 2
+      heads: 8
+      dim: 512
+      mlp_dim: 2048
+
+    - name: "depth_scale_d4"
+      patch_size: 32
+      depth: 4
+      heads: 8
+      dim: 512
+      mlp_dim: 2048
+
+    - name: "depth_scale_d6"
+      patch_size: 32
+      depth: 6
+      heads: 8
+      dim: 512
+      mlp_dim: 2048
+
+    - name: "depth_scale_d8"
+      patch_size: 32
+      depth: 8
+      heads: 8
+      dim: 512
+      mlp_dim: 2048
+
+    - name: "depth_scale_d12"
+      patch_size: 32
+      depth: 12
+      heads: 8
+      dim: 512
+      mlp_dim: 2048
+
+    # Scaling embedding dimension - fixed other params
+    - name: "dim_scale_256"
+      patch_size: 32
+      depth: 6
+      heads: 8
+      dim: 256
+      mlp_dim: 1024
+
+    - name: "dim_scale_512"
+      patch_size: 32
+      depth: 6
+      heads: 8
+      dim: 512
+      mlp_dim: 2048
+
+    - name: "dim_scale_768"
+      patch_size: 32
+      depth: 6
+      heads: 8
+      dim: 768
+      mlp_dim: 3072
+
+    - name: "dim_scale_1024"
+      patch_size: 32
+      depth: 6
+      heads: 8
+      dim: 1024
+      mlp_dim: 4096
