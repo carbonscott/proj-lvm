@@ -1,8 +1,0 @@
-# @package _global_
-# Output Configuration
-
-output:
-  base_dir: "outputs"
-  nsys_reports_dir: "nsys_reports"
-  logs_dir: "logs"
-  results_file: "results.json"

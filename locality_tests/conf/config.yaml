@@ -3,8 +3,14 @@
 
 defaults:
   - experiment: numa_study
-  - output: base
   - _self_
+
+# Output configuration
+output:
+  base_dir: "outputs"
+  nsys_reports_dir: "nsys_reports"
+  logs_dir: "logs"  
+  results_file: "results.json"
 
 # Global overrides (can be overridden from command line)
 hydra:

@@ -1,0 +1,30 @@
+# Hydra experiment outputs
+outputs/
+multirun/
+experiment.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# nsys reports (if not in outputs/)
+*.nsys-rep
+*.sqlite
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Results and logs (if not in outputs/)
+results/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

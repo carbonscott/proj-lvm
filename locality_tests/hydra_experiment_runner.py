@@ -111,7 +111,6 @@ class OutputConfig:
 class Config:
     experiment: ExperimentConfig
     output: OutputConfig
-    defaults: List[Any] = None
 
 
 class HydraExperimentRunner:
@@ -379,11 +378,9 @@ class HydraExperimentRunner:
         self.logger.info(f"Summary saved to: {summary_file}")
 
 
-# Register configuration schemas with Hydra
-cs = ConfigStore.instance()
-cs.store(name="config", node=Config)
-cs.store(group="experiment", name="base", node=ExperimentConfig)
-cs.store(group="output", name="base", node=OutputConfig)
+# Register configuration schemas with Hydra (optional - for type validation)
+# cs = ConfigStore.instance()
+# cs.store(group="experiment", name="base", node=ExperimentConfig)
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
