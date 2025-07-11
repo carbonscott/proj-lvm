@@ -1,0 +1,47 @@
+# @package _global_
+# Quick Test Configuration for Framework Validation
+
+experiment:
+  name: "quick_test"
+  description: "Quick test run for framework validation and debugging"
+  max_workers: 2
+  resume: true
+
+  test:
+    num_samples: 100
+    batch_size: 5
+    warmup_samples: 20
+    memory_size_mb: 256
+    tensor_shape: [3, 224, 224]
+    compile_model: false
+    timeout_s: 300
+
+  hardware:
+    gpu_ids: [0]
+    numa_nodes: [0]
+
+  # Small set of representative configurations
+  vit_configs:
+    # No-op for baseline
+    - name: "test_noop"
+      patch_size: 32
+      depth: 0
+      heads: 8
+      dim: 256
+      mlp_dim: 1024
+
+    # Light compute
+    - name: "test_light"
+      patch_size: 32
+      depth: 2
+      heads: 4
+      dim: 256
+      mlp_dim: 1024
+
+    # Medium compute
+    - name: "test_medium"
+      patch_size: 32
+      depth: 4
+      heads: 8
+      dim: 512
+      mlp_dim: 2048

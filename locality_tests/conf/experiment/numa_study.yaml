@@ -1,0 +1,69 @@
+# @package _global_
+# NUMA Locality Study Configuration
+
+experiment:
+  name: "numa_locality_study"
+  description: "Study NUMA locality effects across different ViT model sizes and GPU-NUMA combinations"
+  max_workers: 4
+  resume: true
+
+  test:
+    num_samples: 1000
+    batch_size: 10
+    warmup_samples: 100
+    memory_size_mb: 512
+    tensor_shape: [3, 224, 224]
+    compile_model: false
+    timeout_s: 600
+
+  hardware:
+    gpu_ids: [0, 1, 2, 3]  # Adjust based on your system
+    numa_nodes: [0, 2]     # Test local vs remote NUMA nodes
+
+  # ViT model configurations covering different compute/memory ratios
+  vit_configs:
+    # No-op baseline: Pure memory transfer test
+    - name: "noop"
+      patch_size: 32
+      depth: 0
+      heads: 8
+      dim: 256
+      mlp_dim: 1024
+
+    # Lightweight models: Memory transfer dominates
+    - name: "light_small"
+      patch_size: 32
+      depth: 2
+      heads: 4
+      dim: 128
+      mlp_dim: 512
+
+    - name: "light_medium"
+      patch_size: 32
+      depth: 4
+      heads: 8
+      dim: 256
+      mlp_dim: 1024
+
+    # Medium models: Balanced compute/memory
+    - name: "medium_balanced"
+      patch_size: 32
+      depth: 6
+      heads: 8
+      dim: 512
+      mlp_dim: 2048
+
+    - name: "medium_compute"
+      patch_size: 16
+      depth: 8
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+
+    # Heavy models: Compute dominates
+    - name: "heavy_large"
+      patch_size: 16
+      depth: 12
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096

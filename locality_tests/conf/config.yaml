@@ -1,0 +1,25 @@
+# Main Hydra Configuration for GPU NUMA Experiments
+# This is the entry point that composes other configurations
+
+defaults:
+  - experiment: numa_study
+  - output: base
+  - _self_
+
+# Global overrides (can be overridden from command line)
+hydra:
+  # Automatic experiment directory creation with timestamps
+  run:
+    dir: outputs/${experiment.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  
+  # For multi-run parameter sweeps
+  sweep:
+    dir: multirun/${experiment.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra:job.num}
+  
+  # Configure logging
+  job_logging:
+    level: INFO
+    handlers:
+      file:
+        filename: experiment.log
