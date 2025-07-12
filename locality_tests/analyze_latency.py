@@ -118,19 +118,8 @@ class SQLiteCUPTIAnalyzer:
                 'vit_patch_size': int(match.group(3)),
                 'vit_depth': int(match.group(4)),
                 'vit_dim': int(match.group(5)),
-                'test_type': 'ViT Pipeline' if int(match.group(4)) > 0 else 'H2D/D2H Only'
+                'test_type': 'ViT Pipeline' if int(match.group(4)) > 0 else 'Memory Transfer Only'
             })
-        else:
-            # Try h2d_d2h pattern
-            h2d_pattern = r'h2d_d2h_gpu(\d+)_numa(\d+)'
-            match = re.search(h2d_pattern, self.config_name)
-            if match:
-                config.update({
-                    'gpu_id': int(match.group(1)),
-                    'numa_node': int(match.group(2)),
-                    'vit_depth': 0,
-                    'test_type': 'H2D/D2H Only'
-                })
 
         return config
 

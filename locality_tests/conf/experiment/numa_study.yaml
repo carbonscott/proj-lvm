@@ -23,7 +23,7 @@ experiment:
   # ViT model configurations covering different compute/memory ratios
   vit_configs:
     # No-op baseline: Pure memory transfer test
-    - name: "noop"
+    - name: "vit0x0x0"
       patch_size: 32
       depth: 0
       heads: 8
@@ -31,14 +31,14 @@ experiment:
       mlp_dim: 1024
 
     # Lightweight models: Memory transfer dominates
-    - name: "light_small"
+    - name: "vit32x2x128"
       patch_size: 32
       depth: 2
       heads: 4
       dim: 128
       mlp_dim: 512
 
-    - name: "light_medium"
+    - name: "vit32x4x256"
       patch_size: 32
       depth: 4
       heads: 8
@@ -46,14 +46,14 @@ experiment:
       mlp_dim: 1024
 
     # Medium models: Balanced compute/memory
-    - name: "medium_balanced"
+    - name: "vit32x6x512"
       patch_size: 32
       depth: 6
       heads: 8
       dim: 512
       mlp_dim: 2048
 
-    - name: "medium_compute"
+    - name: "vit16x8x768"
       patch_size: 16
       depth: 8
       heads: 12
@@ -61,7 +61,7 @@ experiment:
       mlp_dim: 3072
 
     # Heavy models: Compute dominates
-    - name: "heavy_large"
+    - name: "vit16x12x1024"
       patch_size: 16
       depth: 12
       heads: 16

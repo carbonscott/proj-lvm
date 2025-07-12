@@ -23,35 +23,35 @@ experiment:
   # Systematic scaling of model parameters
   vit_configs:
     # Scaling depth (transformer layers) - fixed other params
-    - name: "depth_scale_d2"
+    - name: "vit32x2x512"
       patch_size: 32
       depth: 2
       heads: 8
       dim: 512
       mlp_dim: 2048
 
-    - name: "depth_scale_d4"
+    - name: "vit32x4x512"
       patch_size: 32
       depth: 4
       heads: 8
       dim: 512
       mlp_dim: 2048
 
-    - name: "depth_scale_d6"
+    - name: "vit32x6x512"
       patch_size: 32
       depth: 6
       heads: 8
       dim: 512
       mlp_dim: 2048
 
-    - name: "depth_scale_d8"
+    - name: "vit32x8x512"
       patch_size: 32
       depth: 8
       heads: 8
       dim: 512
       mlp_dim: 2048
 
-    - name: "depth_scale_d12"
+    - name: "vit32x12x512"
       patch_size: 32
       depth: 12
       heads: 8
@@ -59,28 +59,28 @@ experiment:
       mlp_dim: 2048
 
     # Scaling embedding dimension - fixed other params
-    - name: "dim_scale_256"
+    - name: "vit32x6x256"
       patch_size: 32
       depth: 6
       heads: 8
       dim: 256
       mlp_dim: 1024
 
-    - name: "dim_scale_512"
+    - name: "vit32x6x512"
       patch_size: 32
       depth: 6
       heads: 8
       dim: 512
       mlp_dim: 2048
 
-    - name: "dim_scale_768"
+    - name: "vit32x6x768"
       patch_size: 32
       depth: 6
       heads: 8
       dim: 768
       mlp_dim: 3072
 
-    - name: "dim_scale_1024"
+    - name: "vit32x6x1024"
       patch_size: 32
       depth: 6
       heads: 8
