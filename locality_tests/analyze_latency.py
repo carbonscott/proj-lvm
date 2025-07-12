@@ -400,27 +400,27 @@ class SQLiteCUPTIAnalyzer:
                     LAG(gpu_end) OVER (PARTITION BY streamId ORDER BY gpu_start) as prev_gpu_end,
                     CASE
                         WHEN LAG(gpu_end) OVER (PARTITION BY streamId ORDER BY gpu_start) IS NOT NULL
-                        THEN gpu_start - LAG(gpu_end) OVER (PARTITION BY streamId ORDER BY gpu_start)
+                        THEN CAST(gpu_start - LAG(gpu_end) OVER (PARTITION BY streamId ORDER BY gpu_start) AS INTEGER)
                         ELSE 0
                     END as gap_ns
                 FROM pipeline_flow
             )
             SELECT
                 COUNT(DISTINCT pf.execution_order) as total_kernels,
-                AVG(pf.preparation_time) / 1e3 as avg_preparation_us,
-                AVG(pf.execution_time) / 1e6 as avg_execution_ms,
-                SUM(pf.execution_time) / 1e6 as total_compute_time_ms,
+                AVG(CAST(pf.preparation_time AS REAL)) / 1e3 as avg_preparation_us,
+                AVG(CAST(pf.execution_time AS REAL)) / 1e6 as avg_execution_ms,
+                SUM(CAST(pf.execution_time AS REAL)) / 1e6 as total_compute_time_ms,
                 (MAX(pf.gpu_end) - MIN(pf.gpu_start)) / 1e6 as total_timeline_ms,
-                1.0 - (COALESCE(SUM(CASE WHEN pg.gap_ns > 1000 THEN pg.gap_ns ELSE 0 END), 0) /
-                       CAST(MAX(pf.gpu_end) - MIN(pf.gpu_start) AS FLOAT)) as pipeline_efficiency,
+                1.0 - (COALESCE(SUM(CASE WHEN CAST(pg.gap_ns AS INTEGER) > 1000 THEN CAST(pg.gap_ns AS INTEGER) ELSE 0 END), 0) /
+                       CAST(MAX(pf.gpu_end) - MIN(pf.gpu_start) AS REAL)) as pipeline_efficiency,
                 COUNT(pg.gap_ns) - 1 as total_gaps,
-                COALESCE(SUM(CASE WHEN pg.gap_ns > 1000 THEN pg.gap_ns ELSE 0 END), 0) as total_significant_gap_time_ns,
-                COALESCE(SUM(CASE WHEN pg.gap_ns > 1000 THEN 1 ELSE 0 END), 0) as significant_gaps_count,
-                COALESCE(SUM(CASE WHEN pg.gap_ns > 10000 THEN 1 ELSE 0 END), 0) as large_gaps_count,
-                COALESCE(SUM(CASE WHEN pg.gap_ns > 100000 THEN 1 ELSE 0 END), 0) as very_large_gaps_count,
-                AVG(CASE WHEN pg.gap_ns > 0 THEN pg.gap_ns END) as avg_gap_ns,
-                MAX(pg.gap_ns) as max_gap_ns,
-                MIN(CASE WHEN pg.gap_ns > 0 THEN pg.gap_ns END) as min_positive_gap_ns
+                COALESCE(SUM(CASE WHEN CAST(pg.gap_ns AS INTEGER) > 1000 THEN CAST(pg.gap_ns AS INTEGER) ELSE 0 END), 0) as total_significant_gap_time_ns,
+                COALESCE(SUM(CASE WHEN CAST(pg.gap_ns AS INTEGER) > 1000 THEN 1 ELSE 0 END), 0) as significant_gaps_count,
+                COALESCE(SUM(CASE WHEN CAST(pg.gap_ns AS INTEGER) > 10000 THEN 1 ELSE 0 END), 0) as large_gaps_count,
+                COALESCE(SUM(CASE WHEN CAST(pg.gap_ns AS INTEGER) > 100000 THEN 1 ELSE 0 END), 0) as very_large_gaps_count,
+                AVG(CASE WHEN CAST(pg.gap_ns AS INTEGER) > 0 THEN CAST(pg.gap_ns AS REAL) END) as avg_gap_ns,
+                MAX(CAST(pg.gap_ns AS INTEGER)) as max_gap_ns,
+                MIN(CASE WHEN CAST(pg.gap_ns AS INTEGER) > 0 THEN CAST(pg.gap_ns AS INTEGER) END) as min_positive_gap_ns
             FROM pipeline_flow pf
             LEFT JOIN pipeline_gaps pg ON pf.execution_order = pg.execution_order
             """
@@ -508,10 +508,10 @@ class SQLiteCUPTIAnalyzer:
                 (t.last_op_end - t.first_op_start) / 1e6 as total_timeline_ms,
                 t.total_active_time / 1e6 as total_active_ms,
                 ((t.last_op_end - t.first_op_start) - t.total_active_time) / 1e6 as total_idle_ms,
-                t.total_active_time / CAST(t.last_op_end - t.first_op_start AS FLOAT) as temporal_compression_ratio,
+                t.total_active_time / CAST(t.last_op_end - t.first_op_start AS REAL) as temporal_compression_ratio,
                 t.total_operations,
                 (SELECT COUNT(*) FROM stream_stats) as active_streams,
-                (SELECT AVG(stream_active_time / CAST(stream_end - stream_start AS FLOAT)) FROM stream_stats) as avg_stream_utilization,
+                (SELECT AVG(stream_active_time / CAST(stream_end - stream_start AS REAL)) FROM stream_stats) as avg_stream_utilization,
                 (SELECT SUM(stream_idle_time) FROM stream_stats) / 1e6 as total_stream_idle_ms
             FROM timeline t
             """
