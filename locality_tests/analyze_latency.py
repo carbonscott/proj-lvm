@@ -602,10 +602,14 @@ def write_analysis_results(results: Dict[str, Any], output_file):
             f.write(f"GPU ID: {config.get('gpu_id', 'unknown')}\n")
             f.write(f"NUMA Node: {config.get('numa_node', 'unknown')}\n")
             f.write(f"Test Type: {config.get('test_type', 'unknown')}\n")
-            if config.get('vit_depth', 0) > 0:
-                f.write(f"ViT Patch Size: {config.get('vit_patch_size', 'unknown')}\n")
-                f.write(f"ViT Depth: {config.get('vit_depth', 'unknown')}\n")
-                f.write(f"ViT Dimension: {config.get('vit_dim', 'unknown')}\n")
+            try:
+                vit_depth = int(config.get('vit_depth', 0)) if config.get('vit_depth') else 0
+                if vit_depth > 0:
+                    f.write(f"ViT Patch Size: {config.get('vit_patch_size', 'unknown')}\n")
+                    f.write(f"ViT Depth: {config.get('vit_depth', 'unknown')}\n")
+                    f.write(f"ViT Dimension: {config.get('vit_dim', 'unknown')}\n")
+            except (ValueError, TypeError):
+                pass  # Skip ViT info if vit_depth is not a valid number
             f.write("\n")
 
         # Analysis scope
