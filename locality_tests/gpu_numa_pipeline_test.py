@@ -426,21 +426,76 @@ def run_pipeline_test(
         _run_double_buffer_pipeline(
             pipeline, cpu_tensors[:warmup_samples], batch_size, "warmup", sync_frequency, is_warmup=True
         )
+        # CRITICAL: Ensure all warmup GPU work completes before test timing
+        pipeline.wait_for_completion()
+        torch.cuda.synchronize()
+        print("Warmup completed, GPU synchronized")
 
-    # Main test phase
+    # Main test phase with accurate total timing
     print(f"Test phase: {num_samples} samples...")
     start_idx = 0 if skip_warmup else warmup_samples
     test_tensors = cpu_tensors[start_idx:start_idx + num_samples]
 
-    results = _run_double_buffer_pipeline(
-        pipeline, test_tensors, batch_size, "test", sync_frequency, is_warmup=False
-    )
-
+    # Start timing AFTER warmup synchronization
+    start_time = time.time()
+    
+    # Process all test batches
+    _run_test_batches(pipeline, test_tensors, batch_size, "test", sync_frequency)
+    
+    # End timing AFTER all GPU work completes
+    pipeline.wait_for_completion()
+    torch.cuda.synchronize()
+    end_time = time.time()
+    
+    # Calculate accurate throughput
+    total_time = end_time - start_time
+    throughput = num_samples / total_time
+    
     # Print results summary
-    _print_results_summary(results)
+    print(f"\n=== Pipeline Results Summary ===")
+    print(f"Test Samples: {num_samples}")
+    print(f"Total Time: {total_time:.6f}s")
+    print(f"Average Throughput: {throughput:.2f} samples/s")
 
     print("\n=== Pipeline Test Completed ===")
     print("Use nsys GUI or stats to analyze the detailed profiling data.")
+
+def _run_test_batches(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency):
+    """Run test batches without individual timing - for total timing accuracy"""
+    
+    with nvtx.range(f"{nvtx_prefix}_double_buffer"):
+        num_batches = (len(tensors) + batch_size - 1) // batch_size
+
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, len(tensors))
+            current_batch_size = batch_end - batch_start
+            batch_tensors = tensors[batch_start:batch_end]
+
+            with nvtx.range(f"{nvtx_prefix}_batch_{batch_idx}"):
+                if batch_idx == 0:
+                    # First batch: just start the pipeline
+                    pipeline.h2d_transfer(batch_tensors, batch_idx, current_batch_size, nvtx_prefix)
+                    pipeline.compute_workload(batch_idx, current_batch_size, nvtx_prefix)
+                    pipeline.d2h_transfer(batch_idx, current_batch_size, nvtx_prefix)
+                else:
+                    # Overlapped execution: start next batch while finishing previous
+                    # Swap to next buffer
+                    pipeline.swap()
+
+                    # Start H2D for current batch (will wait for THIS buffer's D2H via event)
+                    pipeline.h2d_transfer(batch_tensors, batch_idx, current_batch_size, nvtx_prefix)
+
+                    # Start compute for current batch (will wait for H2D)
+                    pipeline.compute_workload(batch_idx, current_batch_size, nvtx_prefix)
+
+                    # Start D2H for current batch (will wait for compute and record event)
+                    pipeline.d2h_transfer(batch_idx, current_batch_size, nvtx_prefix)
+
+                # Progress reporting
+                if (batch_idx + 1) % sync_frequency == 0:
+                    progress = batch_end / len(tensors) * 100
+                    print(f"  Progress: {progress:.1f}% ({batch_end}/{len(tensors)})")
 
 def _run_double_buffer_pipeline(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency, is_warmup):
     """Run fully overlapped double buffered pipeline with optimal performance"""
