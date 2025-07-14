@@ -237,7 +237,7 @@ class DoubleBufferedPipeline:
                         gpu_buffer[i].copy_(resized_tensor, non_blocking=True)
                     else:
                         gpu_buffer[i].copy_(tensor, non_blocking=True)
-                
+
                 # Record H2D completion event for this specific buffer
                 self.h2d_stream.record_event(h2d_event)
 
@@ -267,7 +267,7 @@ class DoubleBufferedPipeline:
                             predictions = self.vit_model(valid_gpu_slice)
                             # Force compute completion with a small operation
                             _ = predictions.sum()
-                
+
                 # Record compute completion event for this specific buffer
                 self.compute_stream.record_event(compute_event)
 
@@ -438,19 +438,19 @@ def run_pipeline_test(
 
     # Start timing AFTER warmup synchronization
     start_time = time.time()
-    
-    # Process all test batches
-    _run_test_batches(pipeline, test_tensors, batch_size, "test", sync_frequency)
-    
+
+    # Process all test batches (without individual timing)
+    _run_double_buffer_pipeline(pipeline, test_tensors, batch_size, "test", sync_frequency, is_warmup=False)
+
     # End timing AFTER all GPU work completes
     pipeline.wait_for_completion()
     torch.cuda.synchronize()
     end_time = time.time()
-    
+
     # Calculate accurate throughput
     total_time = end_time - start_time
     throughput = num_samples / total_time
-    
+
     # Print results summary
     print(f"\n=== Pipeline Results Summary ===")
     print(f"Test Samples: {num_samples}")
@@ -460,8 +460,9 @@ def run_pipeline_test(
     print("\n=== Pipeline Test Completed ===")
     print("Use nsys GUI or stats to analyze the detailed profiling data.")
 
-def _run_test_batches(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency):
-    """Run test batches without individual timing - for total timing accuracy"""
+
+def _run_double_buffer_pipeline(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency, is_warmup):
+    """Run fully overlapped double buffered pipeline without individual timing"""
     
     with nvtx.range(f"{nvtx_prefix}_double_buffer"):
         num_batches = (len(tensors) + batch_size - 1) // batch_size
@@ -497,87 +498,6 @@ def _run_test_batches(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency
                     progress = batch_end / len(tensors) * 100
                     print(f"  Progress: {progress:.1f}% ({batch_end}/{len(tensors)})")
 
-def _run_double_buffer_pipeline(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency, is_warmup):
-    """Run fully overlapped double buffered pipeline with optimal performance"""
-    results = []
-
-    with nvtx.range(f"{nvtx_prefix}_double_buffer"):
-        num_batches = (len(tensors) + batch_size - 1) // batch_size
-
-        for batch_idx in range(num_batches):
-            batch_start = batch_idx * batch_size
-            batch_end = min(batch_start + batch_size, len(tensors))
-            current_batch_size = batch_end - batch_start
-            batch_tensors = tensors[batch_start:batch_end]
-
-            with nvtx.range(f"{nvtx_prefix}_batch_{batch_idx}"):
-                start_time = time.time()
-
-                if batch_idx == 0:
-                    # First batch: just start the pipeline
-                    pipeline.h2d_transfer(batch_tensors, batch_idx, current_batch_size, nvtx_prefix)
-                    pipeline.compute_workload(batch_idx, current_batch_size, nvtx_prefix)
-                    pipeline.d2h_transfer(batch_idx, current_batch_size, nvtx_prefix)
-                else:
-                    # Overlapped execution: start next batch while finishing previous
-                    # Swap to next buffer
-                    pipeline.swap()
-
-                    # Start H2D for current batch (will wait for THIS buffer's D2H via event)
-                    pipeline.h2d_transfer(batch_tensors, batch_idx, current_batch_size, nvtx_prefix)
-
-                    # Start compute for current batch (will wait for H2D)
-                    pipeline.compute_workload(batch_idx, current_batch_size, nvtx_prefix)
-
-                    # Start D2H for current batch (will wait for compute and record event)
-                    pipeline.d2h_transfer(batch_idx, current_batch_size, nvtx_prefix)
-
-                # For last batch, wait for completion and get accurate timing
-                if batch_idx == num_batches - 1:
-                    pipeline.wait_for_completion()
-
-                # Only synchronize for timing when needed (preserves overlap for other batches)
-                if not is_warmup and batch_idx > 0 and batch_idx == num_batches - 1:
-                    torch.cuda.synchronize()
-
-                end_time = time.time()
-
-                if not is_warmup and batch_idx > 0:  # Skip first batch timing (no overlap yet)
-                    results.append({
-                        'batch_idx': batch_idx,
-                        'batch_size': current_batch_size,
-                        'total_duration': end_time - start_time
-                    })
-
-                # Progress reporting
-                if (batch_idx + 1) % sync_frequency == 0:
-                    progress = batch_end / len(tensors) * 100
-                    print(f"  Progress: {progress:.1f}% ({batch_end}/{len(tensors)})")
-
-    return results
-
-def _print_results_summary(results):
-    """Print comprehensive pipeline results summary"""
-    print("\n=== Pipeline Results Summary ===")
-
-    if not results:
-        print("No results to summarize")
-        return
-
-    total_durations = [r['total_duration'] for r in results]
-
-    print(f"Double Buffered Pipeline Statistics:")
-    print(f"  Batches: {len(results)}")
-    print(f"  Total Duration (s): mean={np.mean(total_durations):.6f}, std={np.std(total_durations):.6f}")
-    print(f"  Total Duration (s): min={np.min(total_durations):.6f}, max={np.max(total_durations):.6f}")
-
-    # Calculate throughput
-    if results:
-        batch_sizes = [r['batch_size'] for r in results]
-        avg_batch_size = np.mean(batch_sizes)
-        avg_duration = np.mean(total_durations)
-        throughput = avg_batch_size / avg_duration
-        print(f"  Average Throughput: {throughput:.2f} samples/s")
 
 def main():
     parser = argparse.ArgumentParser(description='GPU NUMA Pipeline Performance Test with ViT Double Buffering')
