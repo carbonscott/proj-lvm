@@ -463,7 +463,7 @@ def run_pipeline_test(
 
 def _run_double_buffer_pipeline(pipeline, tensors, batch_size, nvtx_prefix, sync_frequency, is_warmup):
     """Run fully overlapped double buffered pipeline without individual timing"""
-    
+
     with nvtx.range(f"{nvtx_prefix}_double_buffer"):
         num_batches = (len(tensors) + batch_size - 1) // batch_size
 
