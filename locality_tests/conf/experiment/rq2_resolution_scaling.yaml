@@ -1,0 +1,187 @@
+# @package _global_
+# RQ2: Input Resolution Scaling Characteristics
+#
+# Research Question: How does end-to-end pipeline performance scale with input 
+# resolution for different ViT configurations?
+#
+# Sub-Questions:
+# - RQ2.1: Memory scaling behavior (linear, quadratic, other) for resolution increases
+# - RQ2.2: At what resolution does H2D transfer become the dominant bottleneck
+# - RQ2.3: How does optimal batch size change with input resolution
+# - RQ2.4: Maximum feasible resolution before GPU memory overflow
+
+experiment:
+  name: "rq2_resolution_scaling"
+  description: "Study of end-to-end pipeline performance scaling with input resolution"
+  max_workers: 1  # Sequential execution for accurate measurements
+  resume: true
+
+  test:
+    num_samples: 1500  # Reduced due to larger input sizes
+    batch_size: 4  # Will vary this in multi-run sweeps, start smaller for high res
+    warmup_samples: 150
+    memory_size_mb: 2048  # Increased for high resolution inputs
+    tensor_shape: [3, 256, 256]  # Will be overridden per config
+    compile_model: false
+    timeout_s: 1200  # Increased timeout for large inputs
+
+  hardware:
+    gpu_ids: [0]  # Single GPU for clean comparison
+    numa_nodes: [0]  # Use local NUMA node for best performance baseline
+
+  # Resolution scaling across representative model sizes
+  # Test resolutions: 256², 512², 1024², 2048² as per research plan
+  vit_configs:
+    # === SMALL MODEL: 6-layer, 384-dim ===
+    # 256x256 resolution (baseline)
+    - name: "vit8x6x384_256px"
+      patch_size: 8  # 32x32 patches = 1024 tokens
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 256, 256]
+    
+    - name: "vit16x6x384_256px"
+      patch_size: 16  # 16x16 patches = 256 tokens  
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 256, 256]
+    
+    - name: "vit32x6x384_256px"
+      patch_size: 32  # 8x8 patches = 64 tokens
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 256, 256]
+
+    # 512x512 resolution (4x data)
+    - name: "vit8x6x384_512px"
+      patch_size: 8  # 64x64 patches = 4096 tokens
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 512, 512]
+    
+    - name: "vit16x6x384_512px"
+      patch_size: 16  # 32x32 patches = 1024 tokens
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 512, 512]
+    
+    - name: "vit32x6x384_512px"
+      patch_size: 32  # 16x16 patches = 256 tokens
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 512, 512]
+
+    # 1024x1024 resolution (16x data)
+    - name: "vit16x6x384_1024px"
+      patch_size: 16  # 64x64 patches = 4096 tokens
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 1024, 1024]
+    
+    - name: "vit32x6x384_1024px"
+      patch_size: 32  # 32x32 patches = 1024 tokens
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 1024, 1024]
+
+    # 2048x2048 resolution (64x data) - only larger patch sizes
+    - name: "vit32x6x384_2048px"
+      patch_size: 32  # 64x64 patches = 4096 tokens
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      tensor_shape: [3, 2048, 2048]
+
+    # === MEDIUM MODEL: 12-layer, 768-dim ===
+    # 256x256 resolution
+    - name: "vit16x12x768_256px"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 256, 256]
+    
+    - name: "vit32x12x768_256px"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 256, 256]
+
+    # 512x512 resolution
+    - name: "vit16x12x768_512px"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 512, 512]
+    
+    - name: "vit32x12x768_512px"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 512, 512]
+
+    # 1024x1024 resolution
+    - name: "vit32x12x768_1024px"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 1024, 1024]
+
+    # === LARGE MODEL: 18-layer, 1024-dim ===
+    # 256x256 resolution
+    - name: "vit32x18x1024_256px"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      tensor_shape: [3, 256, 256]
+
+    # 512x512 resolution
+    - name: "vit32x18x1024_512px"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      tensor_shape: [3, 512, 512]
+
+    # === EXTRA LARGE MODEL: 24-layer, 1280-dim ===
+    # 256x256 resolution only (memory constraints)
+    - name: "vit32x24x1280_256px"
+      patch_size: 32
+      depth: 24
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+      tensor_shape: [3, 256, 256]
+
+# Multi-run sweep examples:
+# Batch size scaling: python hydra_experiment_runner.py -m experiment=rq2_resolution_scaling experiment.test.batch_size=1,2,4,8
+# Memory size sweep: python hydra_experiment_runner.py -m experiment=rq2_resolution_scaling experiment.test.memory_size_mb=1024,2048,4096
