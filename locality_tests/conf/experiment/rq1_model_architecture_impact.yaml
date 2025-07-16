@@ -1,0 +1,321 @@
+# @package _global_
+# RQ1: Model Architecture Impact on Inference Performance
+# 
+# Research Question: How do ViT architectural parameters (patch size, model depth, 
+# hidden dimension) affect inference performance metrics across different hardware configurations?
+#
+# Sub-Questions:
+# - RQ1.1: Relationship between model complexity and optimal batch size for throughput
+# - RQ1.2: Memory bandwidth utilization pattern across model configurations  
+# - RQ1.3: GPU utilization saturation threshold across model sizes
+# - RQ1.4: Compute-to-memory-transfer ratio in the pipeline
+
+experiment:
+  name: "rq1_model_architecture_impact"
+  description: "Comprehensive study of ViT architectural parameters on inference performance"
+  max_workers: 1  # Sequential execution for accurate measurements
+  resume: true
+
+  test:
+    num_samples: 2000
+    batch_size: 8  # Will vary this in multi-run sweeps
+    warmup_samples: 200
+    memory_size_mb: 1024
+    tensor_shape: [3, 224, 224]  # Standard ImageNet size for RQ1
+    compile_model: false
+    timeout_s: 900
+
+  hardware:
+    gpu_ids: [0]  # Single GPU for clean comparison
+    numa_nodes: [0]  # Use local NUMA node for best performance baseline
+
+  # Comprehensive ViT parameter sweep based on research plan
+  # Patch sizes: {8, 16, 32} × Depths: {6, 12, 18, 24} × Dims: {384, 768, 1024, 1280}
+  vit_configs:
+    # === PATCH SIZE 8 CONFIGURATIONS ===
+    # Small models with patch size 8
+    - name: "vit8x6x384"
+      patch_size: 8
+      depth: 6
+      heads: 6  # dim/64 for optimal attention head sizing
+      dim: 384
+      mlp_dim: 1536  # 4x dim
+    
+    - name: "vit8x6x768"
+      patch_size: 8
+      depth: 6
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit8x6x1024"
+      patch_size: 8
+      depth: 6
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+    
+    - name: "vit8x6x1280"
+      patch_size: 8
+      depth: 6
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+
+    # Medium depth models with patch size 8
+    - name: "vit8x12x384"
+      patch_size: 8
+      depth: 12
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit8x12x768"
+      patch_size: 8
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit8x12x1024"
+      patch_size: 8
+      depth: 12
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+
+    # Deep models with patch size 8
+    - name: "vit8x18x384"
+      patch_size: 8
+      depth: 18
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit8x18x768"
+      patch_size: 8
+      depth: 18
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+
+    - name: "vit8x24x384"
+      patch_size: 8
+      depth: 24
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+
+    # === PATCH SIZE 16 CONFIGURATIONS ===
+    # Small models with patch size 16
+    - name: "vit16x6x384"
+      patch_size: 16
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit16x6x768"
+      patch_size: 16
+      depth: 6
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit16x6x1024"
+      patch_size: 16
+      depth: 6
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+    
+    - name: "vit16x6x1280"
+      patch_size: 16
+      depth: 6
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+
+    # Medium depth models with patch size 16
+    - name: "vit16x12x384"
+      patch_size: 16
+      depth: 12
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit16x12x768"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit16x12x1024"
+      patch_size: 16
+      depth: 12
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+    
+    - name: "vit16x12x1280"
+      patch_size: 16
+      depth: 12
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+
+    # Deep models with patch size 16
+    - name: "vit16x18x384"
+      patch_size: 16
+      depth: 18
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit16x18x768"
+      patch_size: 16
+      depth: 18
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit16x18x1024"
+      patch_size: 16
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+
+    - name: "vit16x24x384"
+      patch_size: 16
+      depth: 24
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit16x24x768"
+      patch_size: 16
+      depth: 24
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+
+    # === PATCH SIZE 32 CONFIGURATIONS ===
+    # Small models with patch size 32
+    - name: "vit32x6x384"
+      patch_size: 32
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit32x6x768"
+      patch_size: 32
+      depth: 6
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit32x6x1024"
+      patch_size: 32
+      depth: 6
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+    
+    - name: "vit32x6x1280"
+      patch_size: 32
+      depth: 6
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+
+    # Medium depth models with patch size 32
+    - name: "vit32x12x384"
+      patch_size: 32
+      depth: 12
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit32x12x768"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit32x12x1024"
+      patch_size: 32
+      depth: 12
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+    
+    - name: "vit32x12x1280"
+      patch_size: 32
+      depth: 12
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+
+    # Deep models with patch size 32
+    - name: "vit32x18x384"
+      patch_size: 32
+      depth: 18
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit32x18x768"
+      patch_size: 32
+      depth: 18
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit32x18x1024"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+    
+    - name: "vit32x18x1280"
+      patch_size: 32
+      depth: 18
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+
+    - name: "vit32x24x384"
+      patch_size: 32
+      depth: 24
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+    
+    - name: "vit32x24x768"
+      patch_size: 32
+      depth: 24
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+    
+    - name: "vit32x24x1024"
+      patch_size: 32
+      depth: 24
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+    
+    - name: "vit32x24x1280"
+      patch_size: 32
+      depth: 24
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+
+# Multi-run sweep example for batch size optimization (RQ1.1)
+# Usage: python hydra_experiment_runner.py -m experiment=rq1_model_architecture_impact experiment.test.batch_size=1,2,4,8,16,32,64

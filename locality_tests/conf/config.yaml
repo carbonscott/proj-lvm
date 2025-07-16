@@ -2,12 +2,12 @@
 # This is the entry point that composes other configurations
 
 defaults:
-  - experiment: numa_study
+  - experiment: rq1_model_architecture_impact
   - _self_
 
 # Output configuration
 output:
-  base_dir: "outputs"
+  base_dir: "experiments"
   nsys_reports_dir: "nsys_reports"
   logs_dir: "logs"  
   results_file: "results.json"
@@ -16,11 +16,11 @@ output:
 hydra:
   # Automatic experiment directory creation with timestamps
   run:
-    dir: outputs/${experiment.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: experiments/${experiment.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
   
   # For multi-run parameter sweeps
   sweep:
-    dir: multirun/${experiment.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: experiments/${experiment.name}_multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra:job.num}
   
   # Configure logging

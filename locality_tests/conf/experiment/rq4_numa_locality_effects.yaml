@@ -1,0 +1,276 @@
+# @package _global_
+# RQ4: NUMA Binding and Memory Locality Effects
+#
+# Research Question: How does NUMA binding affect inference performance across 
+# different model and workload characteristics?
+#
+# Sub-Questions:
+# - RQ4.1: Does optimal NUMA binding strategy differ between small vs large model configurations?
+# - RQ4.2: How does NUMA binding interact with batch size to affect overall system throughput?
+# - RQ4.3: What is the relationship between NUMA binding effectiveness and memory bandwidth utilization?
+# - RQ4.4: How does NUMA binding affect H2D/D2H transfer performance specifically?
+
+experiment:
+  name: "rq4_numa_locality_effects"
+  description: "Study NUMA binding effects across model sizes and memory access patterns"
+  max_workers: 1  # Sequential execution for accurate measurements
+  resume: true
+
+  test:
+    num_samples: 2000
+    batch_size: 8
+    warmup_samples: 200
+    memory_size_mb: 1024
+    tensor_shape: [3, 224, 224]
+    compile_model: false
+    timeout_s: 900
+
+  hardware:
+    gpu_ids: [0]  # Single GPU to isolate NUMA effects
+    numa_nodes: [0, 2]  # Test local (0) vs remote (2) NUMA binding
+
+  # Comprehensive NUMA testing across model complexity spectrum
+  # Each model tested with both local and remote NUMA binding
+  vit_configs:
+    # === LIGHTWEIGHT MODELS - Memory transfer dominated ===
+    # Should show significant NUMA locality benefits
+    
+    # Minimal compute model - NUMA effects should be pronounced
+    - name: "vit32x2x256_numa_local"
+      patch_size: 32
+      depth: 2  # Minimal compute
+      heads: 4
+      dim: 256
+      mlp_dim: 1024
+      numa_node: 0  # Local binding
+    
+    - name: "vit32x2x256_numa_remote"
+      patch_size: 32
+      depth: 2
+      heads: 4
+      dim: 256
+      mlp_dim: 1024
+      numa_node: 2  # Remote binding
+    
+    # Small but realistic model
+    - name: "vit32x6x384_numa_local"
+      patch_size: 32
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      numa_node: 0
+    
+    - name: "vit32x6x384_numa_remote"
+      patch_size: 32
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      numa_node: 2
+    
+    # More patches (higher memory pressure)
+    - name: "vit16x6x384_numa_local"
+      patch_size: 16  # 4x more patches than 32
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      numa_node: 0
+    
+    - name: "vit16x6x384_numa_remote"
+      patch_size: 16
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      numa_node: 2
+
+    # === MEDIUM MODELS - Balanced compute/memory ===
+    # Test NUMA effects as compute becomes more significant
+    
+    - name: "vit32x12x768_numa_local"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 0
+    
+    - name: "vit32x12x768_numa_remote"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 2
+    
+    - name: "vit16x12x768_numa_local"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 0
+    
+    - name: "vit16x12x768_numa_remote"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 2
+    
+    - name: "vit32x12x1024_numa_local"
+      patch_size: 32
+      depth: 12
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      numa_node: 0
+    
+    - name: "vit32x12x1024_numa_remote"
+      patch_size: 32
+      depth: 12
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      numa_node: 2
+
+    # === LARGE MODELS - Compute dominated ===
+    # NUMA effects should be less pronounced due to compute dominance
+    
+    - name: "vit32x18x1024_numa_local"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      numa_node: 0
+    
+    - name: "vit32x18x1024_numa_remote"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      numa_node: 2
+    
+    - name: "vit32x24x1024_numa_local"
+      patch_size: 32
+      depth: 24
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      numa_node: 0
+    
+    - name: "vit32x24x1024_numa_remote"
+      patch_size: 32
+      depth: 24
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      numa_node: 2
+    
+    - name: "vit16x24x1280_numa_local"
+      patch_size: 16
+      depth: 24
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+      numa_node: 0
+    
+    - name: "vit16x24x1280_numa_remote"
+      patch_size: 16
+      depth: 24
+      heads: 20
+      dim: 1280
+      mlp_dim: 5120
+      numa_node: 2
+
+    # === BATCH SIZE SENSITIVITY TESTS (RQ4.2) ===
+    # Test how NUMA binding interacts with batch size
+    
+    # Small batch - should amplify NUMA effects (more overhead per sample)
+    - name: "vit32x12x768_numa_local_batch1"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 0
+      batch_size: 1
+    
+    - name: "vit32x12x768_numa_remote_batch1"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 2
+      batch_size: 1
+    
+    # Large batch - should dilute NUMA effects (amortized overhead)
+    - name: "vit32x12x768_numa_local_batch32"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 0
+      batch_size: 32
+    
+    - name: "vit32x12x768_numa_remote_batch32"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 2
+      batch_size: 32
+
+    # === MEMORY PRESSURE TESTS (RQ4.3) ===
+    # Higher memory usage should amplify NUMA effects
+    
+    - name: "vit32x12x768_numa_local_highmem"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 0
+      memory_size_mb: 2048  # Double memory usage
+    
+    - name: "vit32x12x768_numa_remote_highmem"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      numa_node: 2
+      memory_size_mb: 2048
+
+    # === H2D/D2H TRANSFER FOCUS (RQ4.4) ===
+    # Minimal compute to isolate transfer effects
+    
+    - name: "vit32x1x128_numa_local_transfer"
+      patch_size: 32
+      depth: 1  # Minimal computation
+      heads: 2
+      dim: 128
+      mlp_dim: 512
+      numa_node: 0
+      memory_size_mb: 2048  # Large transfers
+    
+    - name: "vit32x1x128_numa_remote_transfer"
+      patch_size: 32
+      depth: 1
+      heads: 2
+      dim: 128
+      mlp_dim: 512
+      numa_node: 2
+      memory_size_mb: 2048
+
+# Multi-run sweep examples:
+# Batch size sweep: python hydra_experiment_runner.py -m experiment=rq4_numa_locality_effects experiment.test.batch_size=1,2,4,8,16,32
+# Memory pressure: python hydra_experiment_runner.py -m experiment=rq4_numa_locality_effects experiment.test.memory_size_mb=512,1024,2048,4096

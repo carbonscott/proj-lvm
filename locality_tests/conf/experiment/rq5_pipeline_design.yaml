@@ -1,0 +1,304 @@
+# @package _global_
+# RQ5: Pipeline Design and Asynchronous Operations
+#
+# Research Question: What is the optimal pipeline design for maximizing throughput 
+# while maintaining acceptable latency using asynchronous preprocessing and inference overlap?
+#
+# Sub-Questions:
+# - RQ5.1: What is the optimal preprocessing strategy (CPU vs GPU) for different model and resolution combinations?
+# - RQ5.2: How effective is asynchronous data loading + inference overlap across different model configurations?
+# - RQ5.3: What are the trade-offs between single-image latency and batched throughput for high-rate real-time applications?
+# - RQ5.4: Can preprocessing+H2D overlap effectively hide data movement costs?
+# - RQ5.5: What is the optimal buffer management strategy between preprocessing and inference stages?
+
+experiment:
+  name: "rq5_pipeline_design"
+  description: "Study optimal pipeline design for asynchronous preprocessing and inference overlap"
+  max_workers: 1  # Sequential execution for accurate measurements
+  resume: true
+
+  test:
+    num_samples: 3000  # More samples for pipeline stability measurement
+    batch_size: 8
+    warmup_samples: 300  # Increased warmup for pipeline stabilization
+    memory_size_mb: 1024
+    tensor_shape: [3, 224, 224]
+    compile_model: false
+    timeout_s: 1200
+
+  hardware:
+    gpu_ids: [0]  # Single GPU for clean pipeline analysis
+    numa_nodes: [0]  # Use local NUMA node for best performance baseline
+
+  # Pipeline design study across different scenarios
+  # Focus on configurations that highlight pipeline bottlenecks and opportunities
+  vit_configs:
+    
+    # === BASELINE SYNCHRONOUS PIPELINE ===
+    # Standard synchronous processing for comparison
+    
+    - name: "vit32x6x384_sync_baseline"
+      patch_size: 32
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      pipeline_mode: "synchronous"
+    
+    - name: "vit16x12x768_sync_baseline"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "synchronous"
+    
+    - name: "vit32x18x1024_sync_baseline"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      pipeline_mode: "synchronous"
+
+    # === ASYNCHRONOUS PIPELINE VARIANTS ===
+    # Test different async strategies
+    
+    # Small model - should benefit from async due to low compute/transfer ratio
+    - name: "vit32x6x384_async_cpu_preproc"
+      patch_size: 32
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 4
+    
+    - name: "vit32x6x384_async_gpu_preproc"
+      patch_size: 32
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "gpu"
+      queue_depth: 4
+    
+    # Medium model - balanced async benefits
+    - name: "vit16x12x768_async_cpu_preproc"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 4
+    
+    - name: "vit16x12x768_async_gpu_preproc"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "gpu"
+      queue_depth: 4
+    
+    # Large model - compute-bound, less async benefit expected
+    - name: "vit32x18x1024_async_cpu_preproc"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 4
+    
+    - name: "vit32x18x1024_async_gpu_preproc"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "gpu"
+      queue_depth: 4
+
+    # === QUEUE DEPTH OPTIMIZATION (RQ5.5) ===
+    # Test different buffer management strategies
+    
+    - name: "vit16x12x768_async_queue2"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 2
+    
+    - name: "vit16x12x768_async_queue8"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 8
+    
+    - name: "vit16x12x768_async_queue16"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 16
+
+    # === RESOLUTION SCALING WITH PIPELINE (RQ5.1) ===
+    # Test preprocessing strategy effectiveness across resolutions
+    
+    # Low resolution - preprocessing overhead should be minimal
+    - name: "vit32x12x768_async_256px_cpu"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 256, 256]
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 4
+    
+    - name: "vit32x12x768_async_256px_gpu"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 256, 256]
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "gpu"
+      queue_depth: 4
+    
+    # High resolution - preprocessing should become significant
+    - name: "vit32x12x768_async_1024px_cpu"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 1024, 1024]
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 4
+    
+    - name: "vit32x12x768_async_1024px_gpu"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      tensor_shape: [3, 1024, 1024]
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "gpu"
+      queue_depth: 4
+
+    # === BATCH SIZE VS LATENCY TRADE-OFFS (RQ5.3) ===
+    # Test single-image latency vs batched throughput
+    
+    # Single sample - minimum latency
+    - name: "vit16x12x768_async_batch1_latency"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 1  # Minimal buffering for low latency
+      batch_size: 1
+    
+    # Small batch - latency vs throughput balance
+    - name: "vit16x12x768_async_batch4_balanced"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 4
+      batch_size: 4
+    
+    # Large batch - maximum throughput
+    - name: "vit16x12x768_async_batch32_throughput"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 8  # Larger buffer for throughput
+      batch_size: 32
+
+    # === MEMORY PRESSURE PIPELINE TESTS ===
+    # Test pipeline effectiveness under memory pressure
+    
+    - name: "vit16x12x768_async_highmem"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 4
+      memory_size_mb: 2048
+    
+    - name: "vit16x12x768_async_lowmem"
+      patch_size: 16
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 2  # Reduced buffering for memory constraints
+      memory_size_mb: 512
+
+    # === H2D/D2H OVERLAP TESTS (RQ5.4) ===
+    # Configurations designed to test data movement overlap
+    
+    - name: "vit32x6x384_async_overlap_test"
+      patch_size: 32
+      depth: 6  # Fast inference to highlight transfer costs
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 8  # Deep buffer for overlap opportunities
+      memory_size_mb: 2048  # Large transfers
+    
+    - name: "vit8x6x384_async_many_patches"
+      patch_size: 8  # Many patches = more transfer overhead
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      pipeline_mode: "asynchronous"
+      preprocessing_mode: "cpu"
+      queue_depth: 8
+      tensor_shape: [3, 512, 512]  # More patches
+
+# Multi-run sweep examples:
+# Queue depth sweep: python hydra_experiment_runner.py -m experiment=rq5_pipeline_design experiment.test.queue_depth=1,2,4,8,16
+# Batch size sweep: python hydra_experiment_runner.py -m experiment=rq5_pipeline_design experiment.test.batch_size=1,2,4,8,16,32
+# Memory pressure: python hydra_experiment_runner.py -m experiment=rq5_pipeline_design experiment.test.memory_size_mb=512,1024,2048,4096

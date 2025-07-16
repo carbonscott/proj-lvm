@@ -95,13 +95,13 @@ class ExperimentConfig:
     test: TestConfig
     hardware: HardwareConfig
     vit_configs: List[ViTConfig]
-    max_workers: int = 4
+    max_workers: int = 1  # Sequential execution for accurate measurements
     resume: bool = True
 
 
 @dataclass
 class OutputConfig:
-    base_dir: str = "outputs"
+    base_dir: str = "experiments"
     nsys_reports_dir: str = "nsys_reports"
     logs_dir: str = "logs"
     results_file: str = "results.json"

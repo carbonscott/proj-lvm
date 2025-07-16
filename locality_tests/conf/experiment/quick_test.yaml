@@ -23,7 +23,7 @@ experiment:
   # Small set of representative configurations
   vit_configs:
     # No-op for baseline
-    - name: "test_noop"
+    - name: "vit0x0x0"
       patch_size: 32
       depth: 0
       heads: 8
@@ -31,7 +31,7 @@ experiment:
       mlp_dim: 1024
 
     # Light compute
-    - name: "test_light"
+    - name: "vit32x2x256"
       patch_size: 32
       depth: 2
       heads: 4
@@ -39,7 +39,7 @@ experiment:
       mlp_dim: 1024
 
     # Medium compute
-    - name: "test_medium"
+    - name: "vit32x4x512"
       patch_size: 32
       depth: 4
       heads: 8
