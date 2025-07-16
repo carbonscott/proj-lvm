@@ -1,6 +1,6 @@
-# GPU-NUMA Locality Experiments - Execution Guide
+# ViT Inference Optimization - Experiment Execution Guide
 
-This guide provides step-by-step instructions for running GPU-NUMA locality experiments using the unified Hydra-based framework.
+This guide provides step-by-step instructions for running ViT inference optimization experiments using the unified Hydra-based framework across all research questions (RQ1-RQ5).
 
 ## 🚀 Quick Start
 
@@ -12,91 +12,129 @@ This guide provides step-by-step instructions for running GPU-NUMA locality expe
 
 ### Basic Execution
 ```bash
-# Run the core NUMA locality study (48 experiments)
-python hydra_experiment_runner.py experiment=numa_study
+# Run all research questions (RQ1-RQ5) - 157 experiments total
+./run_all_experiments.sh
 
-# Quick framework validation (12 experiments) 
-python hydra_experiment_runner.py experiment=quick_test
+# Run specific research questions
+./run_all_experiments.sh rq1 rq2  # Only RQ1 and RQ2
 
-# Model scaling analysis (36 experiments)
-python hydra_experiment_runner.py experiment=scaling_study
+# Individual research question execution
+python hydra_experiment_runner.py experiment=rq1_model_architecture_impact
+python hydra_experiment_runner.py experiment=rq2_resolution_scaling
+python hydra_experiment_runner.py experiment=rq3_compilation_optimization
+python hydra_experiment_runner.py experiment=rq4_numa_locality_effects
+python hydra_experiment_runner.py experiment=rq5_pipeline_design
 ```
 
-## 📊 Experiment Configurations
+## 📊 Research Questions and Experiment Configurations
 
-### 1. NUMA Locality Study (`numa_study`)
-**Purpose**: Study NUMA locality effects across different ViT model sizes and GPU-NUMA combinations
+### RQ1: Model Architecture Impact (39 configurations)
+**Purpose**: Study how ViT architectural parameters affect inference performance
 
-**Configuration**: 4 GPUs × 2 NUMA nodes × 6 models = **48 experiments**
-- **GPUs**: 0, 1, 2, 3
-- **NUMA Nodes**: 0 (local), 2 (remote)  
-- **Samples**: 1000 per experiment
-- **Duration**: ~30-40 minutes
-
-**Models Tested**:
-| Model Name | Patch | Depth | Dim | Purpose |
-|------------|-------|-------|-----|---------|
-| `vit0x0x0` | 32 | 0 | 0 | Memory transfer baseline |
-| `vit32x2x128` | 32 | 2 | 128 | Memory-bound workload |
-| `vit32x4x256` | 32 | 4 | 256 | Light compute |
-| `vit32x6x512` | 32 | 6 | 512 | Balanced compute/memory |
-| `vit16x8x768` | 16 | 8 | 768 | Moderate compute-bound |
-| `vit16x12x1024` | 16 | 12 | 1024 | Heavy compute-bound |
-
-### 2. Quick Test (`quick_test`)
-**Purpose**: Framework validation and rapid debugging
-
-**Configuration**: 1 GPU × 1 NUMA node × 3 models = **3 experiments**
-- **GPUs**: 0
-- **NUMA Nodes**: 0
-- **Samples**: 100 per experiment (fast execution)
-- **Duration**: ~2-5 minutes
-
-**Models Tested**:
-- `vit0x0x0`: No-op baseline
-- `vit32x2x256`: Light compute
-- `vit32x4x512`: Medium compute
-
-### 3. Model Scaling Study (`scaling_study`)
-**Purpose**: Systematic study of model complexity scaling effects
-
-**Configuration**: 1 GPU × 1 NUMA node × 9 models = **9 experiments**
-- **GPUs**: 0 (single GPU for clean scaling analysis)
-- **NUMA Nodes**: 0 (local NUMA for best performance baseline)
-- **Samples**: 2000 per experiment (high precision)
+**Configuration**: Comprehensive ViT parameter sweep
+- **Patch sizes**: {8, 16, 32}
+- **Depths**: {6, 12, 18, 24}  
+- **Dimensions**: {384, 768, 1024, 1280}
+- **Samples**: 2000 per experiment
 - **Duration**: ~45-60 minutes
 
-**Models Tested**:
-- **Depth Scaling**: vit32x2x512, vit32x4x512, vit32x6x512, vit32x8x512, vit32x12x512
-- **Dimension Scaling**: vit32x6x256, vit32x6x512, vit32x6x768, vit32x6x1024
+**Key Models Tested**:
+- Small models: vit32x6x384, vit16x6x384, vit8x6x384
+- Medium models: vit32x12x768, vit16x12x768, vit8x12x768
+- Large models: vit32x18x1024, vit16x18x1024, vit32x24x1280
+
+### RQ2: Resolution Scaling (17 configurations)
+**Purpose**: Study end-to-end pipeline performance vs input resolution
+
+**Configuration**: Resolution scaling across model sizes
+- **Input resolutions**: {256², 512², 1024², 2048²}
+- **Models**: Representative models from small to large
+- **Samples**: 1500 per experiment (reduced for large inputs)
+- **Duration**: ~30-45 minutes
+
+**Key Models Tested**:
+- Small: vit32x6x384 at all resolutions
+- Medium: vit32x12x768 at 256px, 512px, 1024px
+- Large: vit32x18x1024 at 256px, 512px
+
+### RQ3: Compilation Optimization (26 configurations)
+**Purpose**: Study torch.compile effectiveness across model characteristics
+
+**Configuration**: Compiled vs uncompiled model pairs
+- **Models**: Representative small to large models
+- **Variants**: Each model tested both compiled and uncompiled
+- **Samples**: 2000 per experiment
+- **Duration**: ~60-90 minutes (includes compilation time)
+
+**Key Comparisons**:
+- vit32x6x384_compiled vs vit32x6x384_uncompiled
+- vit32x12x768_compiled vs vit32x12x768_uncompiled
+- vit32x18x1024_compiled vs vit32x18x1024_uncompiled
+
+### RQ4: NUMA Locality Effects (52 configurations)
+**Purpose**: Study NUMA binding impact on inference performance
+
+**Configuration**: NUMA local vs remote binding across models
+- **NUMA nodes**: 0 (local), 2 (remote)
+- **Models**: Lightweight to heavy compute models
+- **Batch sizes**: {1, 8, 32} for sensitivity analysis
+- **Samples**: 2000 per experiment
+- **Duration**: ~60-90 minutes
+
+**Key Models Tested**:
+- Memory-bound: vit32x2x256, vit32x6x384
+- Balanced: vit32x12x768, vit16x12x768
+- Compute-bound: vit32x18x1024, vit16x24x1280
+
+### RQ5: Pipeline Design (23 configurations)
+**Purpose**: Study optimal pipeline design for asynchronous operations
+
+**Configuration**: Synchronous vs asynchronous pipeline variants
+- **Pipeline modes**: synchronous, asynchronous
+- **Queue depths**: {2, 4, 8, 16}
+- **Preprocessing**: CPU vs GPU
+- **Batch sizes**: {1, 4, 32} for latency vs throughput
+- **Samples**: 3000 per experiment (pipeline stability)
+- **Duration**: ~45-75 minutes
+
+**Key Comparisons**:
+- vit32x6x384_sync_baseline vs vit32x6x384_async_cpu_preproc
+- vit16x12x768_async_queue2 vs vit16x12x768_async_queue8
+- vit32x18x1024_async_batch1_latency vs vit32x18x1024_async_batch32_throughput
 
 ## 🔧 Advanced Usage
 
 ### Parameter Overrides
 ```bash
 # Test on specific GPUs
-python hydra_experiment_runner.py experiment=numa_study experiment.hardware.gpu_ids=[0,1]
+python hydra_experiment_runner.py experiment=rq4_numa_locality_effects experiment.hardware.gpu_ids=[0,1]
 
 # Increase sample size for higher precision
-python hydra_experiment_runner.py experiment=quick_test experiment.test.num_samples=500
+python hydra_experiment_runner.py experiment=rq1_model_architecture_impact experiment.test.num_samples=3000
 
 # Test on different NUMA nodes
-python hydra_experiment_runner.py experiment=numa_study experiment.hardware.numa_nodes=[0,1,2]
+python hydra_experiment_runner.py experiment=rq4_numa_locality_effects experiment.hardware.numa_nodes=[0,1,2]
 
 # Enable model compilation
-python hydra_experiment_runner.py experiment=numa_study experiment.test.compile_model=true
+python hydra_experiment_runner.py experiment=rq3_compilation_optimization experiment.test.compile_model=true
 ```
 
 ### Multi-Run Parameter Sweeps
 ```bash
-# Compare compiled vs non-compiled models
-python hydra_experiment_runner.py -m experiment=scaling_study experiment.test.compile_model=true,false
+# Compare compiled vs non-compiled models (RQ3)
+python hydra_experiment_runner.py -m experiment=rq3_compilation_optimization experiment.test.compile_model=true,false
 
-# NUMA comparison with compilation study
-python hydra_experiment_runner.py -m experiment=numa_study experiment.test.compile_model=true,false experiment.hardware.numa_nodes="[0],[2]"
+# NUMA comparison with compilation study (RQ4)
+python hydra_experiment_runner.py -m experiment=rq4_numa_locality_effects experiment.test.compile_model=true,false experiment.hardware.numa_nodes="[0],[2]"
 
-# Custom model parameter sweep
-python hydra_experiment_runner.py -m experiment.vit_configs.depth=2,4,6,8 experiment.hardware.gpu_ids="[0],[1]"
+# Batch size sweep for architecture study (RQ1)
+python hydra_experiment_runner.py -m experiment=rq1_model_architecture_impact experiment.test.batch_size=1,2,4,8,16,32,64
+
+# Resolution scaling sweep (RQ2)  
+python hydra_experiment_runner.py -m experiment=rq2_resolution_scaling experiment.test.tensor_shape="[3,256,256],[3,512,512],[3,1024,1024]"
+
+# Pipeline queue depth optimization (RQ5)
+python hydra_experiment_runner.py -m experiment=rq5_pipeline_design experiment.test.queue_depth=2,4,8,16
 ```
 
 ### Configuration Customization
@@ -105,23 +143,25 @@ python hydra_experiment_runner.py -m experiment.vit_configs.depth=2,4,6,8 experi
 python hydra_experiment_runner.py +experiment=custom experiment.vit_configs.patch_size=16
 
 # Override multiple parameters
-python hydra_experiment_runner.py experiment=numa_study experiment.test.batch_size=20 experiment.test.timeout_s=900
+python hydra_experiment_runner.py experiment=rq1_model_architecture_impact experiment.test.batch_size=20 experiment.test.timeout_s=900
 ```
 
 ## 📁 Output Organization
 
 ### Directory Structure
 ```
-outputs/
-├── numa_locality_study/           # NUMA study results
-│   └── 2025-07-12/
-│       └── 14-30-15/
-│           ├── nsys_reports/      # .nsys-rep profiling files
-│           ├── logs/              # stdout/stderr logs per run
-│           ├── results.json       # Detailed experiment results
+experiments/
+├── rq1_model_architecture_impact/    # RQ1 architecture study results
+│   └── YYYY-MM-DD/
+│       └── HH-MM-SS/
+│           ├── nsys_reports/          # .nsys-rep profiling files
+│           ├── logs/                  # stdout/stderr logs per run
+│           ├── results.json           # Detailed experiment results
 │           └── experiment_summary.json
-├── quick_test/                    # Quick test results
-└── model_scaling_study/           # Scaling study results
+├── rq2_resolution_scaling/            # RQ2 resolution study results
+├── rq3_compilation_optimization/      # RQ3 compilation study results
+├── rq4_numa_locality_effects/        # RQ4 NUMA study results
+└── rq5_pipeline_design/               # RQ5 pipeline study results
 ```
 
 ### Key Output Files
@@ -134,66 +174,96 @@ outputs/
 
 ### 1. Run Experiments
 ```bash
-python hydra_experiment_runner.py experiment=numa_study
+# Run all research questions
+./run_all_experiments.sh
+
+# Or individual research questions
+python hydra_experiment_runner.py experiment=rq1_model_architecture_impact
+python hydra_experiment_runner.py experiment=rq2_resolution_scaling
+python hydra_experiment_runner.py experiment=rq3_compilation_optimization
+python hydra_experiment_runner.py experiment=rq4_numa_locality_effects
+python hydra_experiment_runner.py experiment=rq5_pipeline_design
 ```
 
 ### 2. Convert Nsys to SQLite
 ```bash
 # Convert all .nsys-rep files to SQLite databases
-find outputs/ -name "*.nsys-rep" -exec nsys export --type=sqlite {} \;
+python batch_nsys_to_sqlite.py experiments/ --verbose
 ```
 
 ### 3. Analyze Results
 ```bash
-# Run unified analysis script
-python analyze_latency.py --db-directory outputs/numa_locality_study/2025-07-12/14-30-15/nsys_reports/
+# Run comprehensive analysis by research question
+cd experiments/rq1_model_architecture_impact/*/*/nsys_reports
+python ../../../../../analyze_latency.py --console-summary --output-dir ../../../../../rq1_analysis_results *.sqlite
+
+cd experiments/rq2_resolution_scaling/*/*/nsys_reports  
+python ../../../../../analyze_latency.py --console-summary --output-dir ../../../../../rq2_analysis_results *.sqlite
+
+cd experiments/rq3_compilation_optimization/*/*/nsys_reports
+python ../../../../../analyze_latency.py --console-summary --output-dir ../../../../../rq3_analysis_results *.sqlite
+
+cd experiments/rq4_numa_locality_effects/*/*/nsys_reports
+python ../../../../../analyze_latency.py --console-summary --output-dir ../../../../../rq4_analysis_results *.sqlite
+
+cd experiments/rq5_pipeline_design/*/*/nsys_reports
+python ../../../../../analyze_latency.py --console-summary --output-dir ../../../../../rq5_analysis_results *.sqlite
 ```
 
 ## 🎯 Reproducible Experiment Scenarios
 
-### Scenario 1: Full NUMA Locality Analysis
+### Scenario 1: Full Architecture Impact Analysis (RQ1)
 ```bash
-# Complete NUMA study (reproduces original 48 experiments)
-python hydra_experiment_runner.py experiment=numa_study
+# Complete architecture study (39 configurations)
+python hydra_experiment_runner.py experiment=rq1_model_architecture_impact
 
-# Expected: 48 successful runs, ~35 minutes, 100% success rate
-# Generates: pipeline_gpu{0-3}_numa{0,2}_vit{model} files
+# Expected: 39 successful runs, ~45-60 minutes, 100% success rate
+# Purpose: Understand how ViT parameters affect performance
 ```
 
-### Scenario 2: Performance Baseline
+### Scenario 2: Resolution Scaling Study (RQ2)
 ```bash
-# Quick validation (reproduces original validation)
-python hydra_experiment_runner.py experiment=quick_test experiment.hardware.gpu_ids=[0,1,2,3]
+# Resolution scaling analysis (17 configurations)
+python hydra_experiment_runner.py experiment=rq2_resolution_scaling
 
-# Expected: 12 successful runs, ~5 minutes
-# Purpose: Verify framework on all GPUs
+# Expected: 17 successful runs, ~30-45 minutes
+# Purpose: Study performance vs input resolution
 ```
 
-### Scenario 3: Scaling Analysis
+### Scenario 3: Compilation Optimization Study (RQ3)
 ```bash
-# Model complexity study (reproduces original scaling)
-python hydra_experiment_runner.py experiment=scaling_study
+# Compare compiled vs non-compiled (26 configurations)
+python hydra_experiment_runner.py experiment=rq3_compilation_optimization
 
-# Expected: 9 successful runs, ~45 minutes
-# Purpose: Understand compute vs memory scaling
+# Expected: 26 runs, ~60-90 minutes
+# Purpose: Measure torch.compile effectiveness
 ```
 
-### Scenario 4: Compilation Optimization Study
+### Scenario 4: NUMA Locality Effects (RQ4)
 ```bash
-# Compare compiled vs non-compiled (reproduces optimization study)
-python hydra_experiment_runner.py -m experiment=scaling_study experiment.test.compile_model=true,false
+# NUMA binding study (52 configurations)
+python hydra_experiment_runner.py experiment=rq4_numa_locality_effects
 
-# Expected: 18 runs (9×2), ~90 minutes
-# Purpose: Measure torch.compile benefits
+# Expected: 52 runs, ~60-90 minutes
+# Purpose: Understand NUMA binding impact
 ```
 
-### Scenario 5: Comprehensive Analysis
+### Scenario 5: Pipeline Design Optimization (RQ5)
 ```bash
-# Full parameter sweep (reproduces comprehensive study)
-python hydra_experiment_runner.py -m experiment=numa_study experiment.test.compile_model=true,false experiment.hardware.numa_nodes="[0],[2]" experiment.test.num_samples=500
+# Pipeline design study (23 configurations)
+python hydra_experiment_runner.py experiment=rq5_pipeline_design
 
-# Expected: 96 runs (4×2×6×2), ~2-3 hours
-# Purpose: Complete NUMA×compilation×GPU×model matrix
+# Expected: 23 runs, ~45-75 minutes
+# Purpose: Optimize asynchronous pipeline strategies
+```
+
+### Scenario 6: Comprehensive Analysis (All RQs)
+```bash
+# Full research question sweep (157 configurations)
+./run_all_experiments.sh
+
+# Expected: 157 runs, ~4-6 hours
+# Purpose: Complete ViT optimization study across all research questions
 ```
 
 ## 🚨 Troubleshooting
@@ -207,7 +277,11 @@ python hydra_experiment_runner.py -m experiment=numa_study experiment.test.compi
 ### Monitoring Progress
 ```bash
 # Check experiment status
-tail -f outputs/*/logs/experiment.log
+tail -f logs/rq1_run.log     # For RQ1
+tail -f logs/rq2_run.log     # For RQ2
+tail -f logs/rq3_run.log     # For RQ3
+tail -f logs/rq4_run.log     # For RQ4
+tail -f logs/rq5_run.log     # For RQ5
 
 # Monitor GPU usage
 nvidia-smi -l 1
@@ -219,23 +293,27 @@ numactl --hardware
 ### Resume Interrupted Experiments
 ```bash
 # Hydra automatically resumes with resume=true (default)
-python hydra_experiment_runner.py experiment=numa_study
+python hydra_experiment_runner.py experiment=rq1_model_architecture_impact
 
 # Force fresh start
-python hydra_experiment_runner.py experiment=numa_study experiment.resume=false
+python hydra_experiment_runner.py experiment=rq1_model_architecture_impact experiment.resume=false
 ```
 
 ## 📈 Expected Results
 
 ### Performance Characteristics
-- **Memory-bound models** (vit0x0x0, vit32x2x128): High NUMA locality penalty (30-47%)
-- **Compute-bound models** (vit16x12x1024): Low NUMA locality penalty (10-15%)
-- **Balanced models** (vit32x6x512): Moderate NUMA locality penalty (20-30%)
+- **Small models** (384-dim): ~30% GPU utilization regardless of optimizations
+- **Medium models** (768-dim): ~98% GPU utilization with clear performance threshold
+- **Large models** (1024+ dim): ~99% GPU utilization with minimal optimization benefit
+- **Resolution scaling**: Well-designed models maintain efficiency across 256px-2048px
+- **Compilation effects**: Minimal impact (<1% difference) for ViT inference
+- **NUMA effects**: Subtle differences (~1.35x max) rather than dramatic 3x differences
 
 ### Success Metrics
 - **Success Rate**: Should achieve 100% (zero failures)
 - **Throughput Range**: 300-7000 samples/second depending on model
-- **Execution Time**: 2 minutes (quick_test) to 3 hours (comprehensive)
+- **Execution Time**: 30 minutes (RQ2) to 6 hours (all RQs)
+- **Total Configurations**: 157 across all research questions
 
 ## 🔄 Integration with Analysis
 
@@ -249,7 +327,14 @@ python hydra_experiment_runner.py experiment=numa_study experiment.resume=false
 ### File Naming Convention
 All experiments now generate files with unified naming:
 ```
-pipeline_gpu{N}_numa{N}_vit{patch}x{depth}x{dim}.nsys-rep
+gpu{N}_numa{N}_vit{patch}x{depth}x{dim}[_suffix].nsys-rep
 ```
+
+Examples:
+- RQ1: `gpu0_numa0_vit32x12x768.nsys-rep`
+- RQ2: `gpu0_numa0_vit32x12x768_256px.nsys-rep`
+- RQ3: `gpu0_numa0_vit32x12x768_compiled.nsys-rep`
+- RQ4: `gpu0_numa0_vit32x12x768_numa_local.nsys-rep`
+- RQ5: `gpu0_numa0_vit32x12x768_async_cpu_preproc.nsys-rep`
 
 This ensures seamless integration with the unified analysis pipeline.
