@@ -82,6 +82,87 @@ python hydra_experiment_runner.py experiment=rq5_pipeline_design
 python hydra_experiment_runner.py experiment=rq3_compilation_optimization
 ```
 
+#### Targeted Execution: Advanced Compilation Modes Only
+
+**Running only the 6 advanced compilation mode experiments** (reduce-overhead and max-autotune):
+
+**Option 1: Create Override Config (Recommended)**
+Create `conf/experiment/rq3_advanced_only.yaml`:
+```yaml
+# @package _global_
+defaults:
+  - rq3_compilation_optimization
+
+experiment:
+  name: "rq3_advanced_compilation_modes_only"
+  vit_configs:
+    - name: "vit16x6x384_compiled_reduce-overhead"
+      patch_size: 16
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      compile_model: true
+      compile_mode: "reduce-overhead"
+    
+    - name: "vit16x6x384_compiled_max-autotune"
+      patch_size: 16
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      compile_model: true
+      compile_mode: "max-autotune"
+    
+    - name: "vit32x12x768_compiled_reduce-overhead"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      compile_model: true
+      compile_mode: "reduce-overhead"
+    
+    - name: "vit32x12x768_compiled_max-autotune"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      compile_model: true
+      compile_mode: "max-autotune"
+    
+    - name: "vit32x18x1024_compiled_reduce-overhead"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "reduce-overhead"
+    
+    - name: "vit32x18x1024_compiled_max-autotune"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+```
+
+**Usage:**
+```bash
+# Run only the 6 advanced compilation mode experiments (~15-20 minutes)
+python hydra_experiment_runner.py experiment=rq3_advanced_only
+```
+
+**Benefits:**
+- ✅ No code modifications required
+- ✅ Preserves main RQ3 config for full pipeline runs
+- ✅ Reusable for future targeted experiments
+- ✅ Clean separation of concerns
+
 ### RQ4: NUMA Locality Effects (52 configurations)
 **Purpose**: Study NUMA binding impact on inference performance
 
