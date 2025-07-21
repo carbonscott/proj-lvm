@@ -107,7 +107,7 @@ def get_gpu_info(gpu_id):
     except Exception as e:
         return {'error': str(e)}
 
-def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id, compile_model=False):
+def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id, compile_model=False, compile_mode='default'):
     """Create ViT model for compute simulation, or None for no-op"""
     C, H, W = tensor_shape
 
@@ -140,13 +140,13 @@ def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_i
 
     # Add torch.compile if requested and available
     if compile_model and check_torch_compile_available():
-        print(f"Compiling ViT model (depth={depth}, dim={dim}) for reduced kernel overhead...")
+        print(f"Compiling ViT model (depth={depth}, dim={dim}) with mode={compile_mode}...")
         try:
-            # Use default backend and mode for best compatibility
-            vit_model = torch.compile(vit_model, mode='default')
-            print("Model compilation successful")
+            # Use specified compilation mode
+            vit_model = torch.compile(vit_model, mode=compile_mode)
+            print(f"Model compilation successful (mode={compile_mode})")
         except Exception as e:
-            print(f"Warning: Model compilation failed ({e}), using non-compiled model")
+            print(f"Warning: Model compilation failed with mode={compile_mode} ({e}), using non-compiled model")
     elif compile_model and not check_torch_compile_available():
         print("Warning: torch.compile not available (requires PyTorch 2.0+), using non-compiled model")
 
@@ -155,7 +155,7 @@ def create_vit_model(tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_i
 class DoubleBufferedPipeline:
     """Double buffered pipeline for H2D -> ViT Compute -> D2H"""
 
-    def __init__(self, batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory=True, compile_model=False):
+    def __init__(self, batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory=True, compile_model=False, compile_mode='default'):
         self.batch_size = batch_size
         self.tensor_shape = tensor_shape
         self.gpu_id = gpu_id
@@ -186,7 +186,7 @@ class DoubleBufferedPipeline:
 
         # Create ViT model (or None for no-op) - NOW WITH COMPILATION SUPPORT
         self.vit_model, self.image_size = create_vit_model(
-            tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id, compile_model
+            tensor_shape, patch_size, depth, heads, dim, mlp_dim, gpu_id, compile_model, compile_mode
         )
         self.is_noop = (self.vit_model is None)
 
@@ -324,7 +324,8 @@ def run_pipeline_test(
     pin_memory=True,
     fill_pattern='random',
     sync_frequency=10,
-    compile_model=False
+    compile_model=False,
+    compile_mode='default'
 ):
     """
     Run comprehensive pipeline performance test with double buffering
@@ -361,7 +362,7 @@ def run_pipeline_test(
     print(f"Pin Memory: {pin_memory}")
     print(f"Sync Frequency: {sync_frequency}")
     print(f"Deterministic: {deterministic}")
-    print(f"Compile Model: {compile_model}")
+    print(f"Compile Model: {compile_model} (mode: {compile_mode})")
     print("=" * 60)
 
     # Check vit-pytorch availability for non-no-op mode
@@ -376,6 +377,13 @@ def run_pipeline_test(
         sys.exit(1)
 
     torch.cuda.set_device(gpu_id)
+
+    # Increase warmup for aggressive compilation modes
+    if compile_model and compile_mode in ['reduce-overhead', 'max-autotune']:
+        original_warmup = warmup_samples
+        warmup_samples = max(warmup_samples, 1000)
+        if warmup_samples > original_warmup:
+            print(f"Increased warmup samples to {warmup_samples} for {compile_mode} compilation mode")
 
     # Allocate CPU memory pool
     print(f"Allocating {memory_size_mb} MB CPU memory pool...")
@@ -417,7 +425,7 @@ def run_pipeline_test(
 
     # Create pipeline - NOW WITH COMPILATION SUPPORT
     pipeline = DoubleBufferedPipeline(
-        batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory, compile_model
+        batch_size, tensor_shape, gpu_id, patch_size, depth, heads, dim, mlp_dim, pin_memory, compile_model, compile_mode
     )
 
     # Warmup phase
@@ -542,9 +550,11 @@ def main():
     parser.add_argument('--fill-pattern', choices=['random', 'sequential', 'zeros'], default='random',
                         help='Memory fill pattern (default: random)')
 
-    # Compilation option
+    # Compilation options
     parser.add_argument('--compile-model', action='store_true',
                         help='Enable torch.compile for reduced kernel overhead (requires PyTorch 2.0+)')
+    parser.add_argument('--compile-mode', choices=['default', 'reduce-overhead', 'max-autotune'], 
+                        default='default', help='torch.compile optimization mode (default: default)')
 
     # Profiling and automation
     parser.add_argument('--nsys-report', type=str, default=None,
@@ -569,7 +579,8 @@ def main():
         pin_memory=not args.no_pin_memory,
         fill_pattern=args.fill_pattern,
         sync_frequency=args.sync_frequency,
-        compile_model=args.compile_model
+        compile_model=args.compile_model,
+        compile_mode=args.compile_mode
     )
 
 if __name__ == '__main__':

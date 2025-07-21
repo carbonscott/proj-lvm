@@ -256,6 +256,11 @@ class HydraExperimentRunner:
         if test_cfg.get('compile_model', False):
             cmd.append("--compile-model")
         
+        # Add compile_mode if specified (check both vit_config and test_config)
+        compile_mode = vit_cfg.get('compile_mode') or test_cfg.get('compile_mode')
+        if compile_mode and compile_mode != 'default':
+            cmd.extend(["--compile-mode", compile_mode])
+        
         return cmd
     
     def _execute_command(self, cmd: List[str], stdout_log: Path, stderr_log: Path, 

@@ -19,6 +19,8 @@ How does end-to-end pipeline performance scale with input resolution for differe
 ### RQ3: Compilation Optimization Effectiveness (26 experiments)
 Under what conditions does torch.compile provide significant performance improvements for ViT inference?
 
+**Compilation Mode Analysis**: Systematic evaluation across torch.compile modes (`default`, `reduce-overhead`, `max-autotune`) to characterize kernel optimization effectiveness for different model sizes and workload characteristics.
+
 ### RQ4: NUMA Binding and Memory Locality Effects (52 experiments)
 How does NUMA binding affect inference performance across different model and workload characteristics?
 

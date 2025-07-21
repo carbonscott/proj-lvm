@@ -12,7 +12,7 @@
 
 experiment:
   name: "rq3_compilation_optimization"
-  description: "Study torch.compile optimization effects across different model complexities and conditions"
+  description: "Study torch.compile optimization effects across different model complexities and compilation modes (default, reduce-overhead, max-autotune)"
   max_workers: 1  # Sequential execution for accurate measurements
   resume: true
 
@@ -259,6 +259,68 @@ experiment:
       compile_model: true
       batch_size: 32
 
+    # === ADVANCED COMPILATION MODES ===
+    # Test reduce-overhead and max-autotune modes for kernel optimization
+    # Focused on models showing kernel launch overhead (small kernels, low GPU utilization)
+    
+    # Small model - expect biggest impact from kernel optimization
+    - name: "vit16x6x384_compiled_reduce-overhead"
+      patch_size: 16
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      compile_model: true
+      compile_mode: "reduce-overhead"
+    
+    - name: "vit16x6x384_compiled_max-autotune"
+      patch_size: 16
+      depth: 6
+      heads: 6
+      dim: 384
+      mlp_dim: 1536
+      compile_model: true
+      compile_mode: "max-autotune"
+
+    # Medium model - performance threshold model (768-dim boundary)
+    - name: "vit32x12x768_compiled_reduce-overhead"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      compile_model: true
+      compile_mode: "reduce-overhead"
+    
+    - name: "vit32x12x768_compiled_max-autotune"
+      patch_size: 32
+      depth: 12
+      heads: 12
+      dim: 768
+      mlp_dim: 3072
+      compile_model: true
+      compile_mode: "max-autotune"
+
+    # Large model - compute-bound comparison
+    - name: "vit32x18x1024_compiled_reduce-overhead"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "reduce-overhead"
+    
+    - name: "vit32x18x1024_compiled_max-autotune"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+
 # Multi-run sweep examples:
 # Batch size scaling: python hydra_experiment_runner.py -m experiment=rq3_compilation_optimization experiment.test.batch_size=1,2,4,8,16,32
 # Resolution scaling: python hydra_experiment_runner.py -m experiment=rq3_compilation_optimization experiment.test.tensor_shape="[3,224,224],[3,512,512]"
+# Advanced compilation modes: python hydra_experiment_runner.py experiment=rq3_compilation_optimization hydra.job.name=advanced_compile_modes

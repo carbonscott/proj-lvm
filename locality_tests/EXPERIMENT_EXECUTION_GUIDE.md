@@ -57,19 +57,30 @@ python hydra_experiment_runner.py experiment=rq5_pipeline_design
 - Medium: vit32x12x768 at 256px, 512px, 1024px
 - Large: vit32x18x1024 at 256px, 512px
 
-### RQ3: Compilation Optimization (26 configurations)
-**Purpose**: Study torch.compile effectiveness across model characteristics
+### RQ3: Compilation Optimization (32 configurations)
+**Purpose**: Study torch.compile effectiveness across model characteristics and compilation modes
 
-**Configuration**: Compiled vs uncompiled model pairs
+**Configuration**: Systematic evaluation across compilation modes
 - **Models**: Representative small to large models
-- **Variants**: Each model tested both compiled and uncompiled
+- **Compilation modes**: default, reduce-overhead, max-autotune vs uncompiled
 - **Samples**: 2000 per experiment
-- **Duration**: ~60-90 minutes (includes compilation time)
+- **Duration**: ~90-120 minutes (includes compilation overhead)
 
 **Key Comparisons**:
-- vit32x6x384_compiled vs vit32x6x384_uncompiled
-- vit32x12x768_compiled vs vit32x12x768_uncompiled
-- vit32x18x1024_compiled vs vit32x18x1024_uncompiled
+- vit16x6x384: uncompiled vs compiled vs compiled_reduce-overhead vs compiled_max-autotune
+- vit32x12x768: uncompiled vs compiled vs compiled_reduce-overhead vs compiled_max-autotune  
+- vit32x18x1024: uncompiled vs compiled vs compiled_reduce-overhead vs compiled_max-autotune
+
+**Advanced Compilation Modes**:
+- **reduce-overhead**: Targets kernel launch overhead via automatic CUDA graphs
+- **max-autotune**: Most aggressive optimization strategy
+- **Breakthrough**: Advanced modes provide 30-40% performance improvement for ViT inference
+
+**Execution**:
+```bash
+# Full RQ3 with all 32 configurations (including advanced compilation modes)
+python hydra_experiment_runner.py experiment=rq3_compilation_optimization
+```
 
 ### RQ4: NUMA Locality Effects (52 configurations)
 **Purpose**: Study NUMA binding impact on inference performance
@@ -115,8 +126,9 @@ python hydra_experiment_runner.py experiment=rq1_model_architecture_impact exper
 # Test on different NUMA nodes
 python hydra_experiment_runner.py experiment=rq4_numa_locality_effects experiment.hardware.numa_nodes=[0,1,2]
 
-# Enable model compilation
-python hydra_experiment_runner.py experiment=rq3_compilation_optimization experiment.test.compile_model=true
+# Enable model compilation with advanced modes
+python gpu_numa_pipeline_test.py --compile-model --compile-mode reduce-overhead --vit-patch-size 16 --vit-depth 6 --vit-dim 384
+python gpu_numa_pipeline_test.py --compile-model --compile-mode max-autotune --vit-patch-size 32 --vit-depth 12 --vit-dim 768
 ```
 
 ### Multi-Run Parameter Sweeps
@@ -259,10 +271,10 @@ python hydra_experiment_runner.py experiment=rq5_pipeline_design
 
 ### Scenario 6: Comprehensive Analysis (All RQs)
 ```bash
-# Full research question sweep (157 configurations)
+# Full research question sweep (163 configurations)
 ./run_all_experiments.sh
 
-# Expected: 157 runs, ~4-6 hours
+# Expected: 163 runs, ~4-6 hours
 # Purpose: Complete ViT optimization study across all research questions
 ```
 
@@ -313,7 +325,7 @@ python hydra_experiment_runner.py experiment=rq1_model_architecture_impact exper
 - **Success Rate**: Should achieve 100% (zero failures)
 - **Throughput Range**: 300-7000 samples/second depending on model
 - **Execution Time**: 30 minutes (RQ2) to 6 hours (all RQs)
-- **Total Configurations**: 157 across all research questions
+- **Total Configurations**: 163 across all research questions (includes advanced compilation modes)
 
 ## 🔄 Integration with Analysis
 
@@ -333,7 +345,8 @@ gpu{N}_numa{N}_vit{patch}x{depth}x{dim}[_suffix].nsys-rep
 Examples:
 - RQ1: `gpu0_numa0_vit32x12x768.nsys-rep`
 - RQ2: `gpu0_numa0_vit32x12x768_256px.nsys-rep`
-- RQ3: `gpu0_numa0_vit32x12x768_compiled.nsys-rep`
+- RQ3: `gpu0_numa0_vit32x12x768_compiled_reduce-overhead.nsys-rep`
+- RQ3: `gpu0_numa0_vit32x12x768_compiled_max-autotune.nsys-rep`
 - RQ4: `gpu0_numa0_vit32x12x768_numa_local.nsys-rep`
 - RQ5: `gpu0_numa0_vit32x12x768_async_cpu_preproc.nsys-rep`
 

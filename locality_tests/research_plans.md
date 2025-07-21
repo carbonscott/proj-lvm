@@ -40,7 +40,7 @@ This research investigates the optimization of Vision Transformer (ViT) inferenc
 **Primary Question**: Under what conditions does torch compile provide significant performance improvements for ViT inference, and how does effectiveness vary with model characteristics?
 
 **Sub-Questions**:
-- **RQ3.1**: Do smaller models benefit more from compilation due to reduced kernel launch overhead, or do larger models benefit more due to kernel fusion opportunities?
+- **RQ3.1**: Do smaller models benefit more from compilation due to reduced kernel launch overhead, or do larger models benefit more due to kernel fusion opportunities? Evaluated across compilation modes (default, reduce-overhead, max-autotune) to characterize optimization strategies.
 - **RQ3.2**: How does compilation effectiveness vary with batch size and input resolution combinations?
 - **RQ3.3**: What specific ViT operations (attention mechanism, MLP blocks, patch embedding, positional encoding) see the most significant compilation speedup?
 - **RQ3.4**: What is the compilation overhead cost, and at what point does the performance benefit justify the compilation time?
