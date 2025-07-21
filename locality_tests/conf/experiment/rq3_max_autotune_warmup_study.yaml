@@ -1,0 +1,148 @@
+# @package _global_
+# RQ3 Extended: max-autotune Warmup Scaling Study for Large Model Optimization
+#
+# Research Question: Does extended warmup enable max-autotune mode to optimize 
+# large ViT models through sophisticated kernel fusion and autotuning?
+#
+# Hypothesis: Large models need 5000-10000 warmup samples for max-autotune to 
+# discover effective kernel fusion patterns and memory optimization strategies.
+
+experiment:
+  name: "rq3_max_autotune_warmup_study"
+  description: "Test if extended warmup enables max-autotune to optimize large ViT models through kernel fusion"
+  max_workers: 1  # Sequential execution for accurate measurements
+  resume: true
+
+  test:
+    num_samples: 2000
+    batch_size: 8
+    memory_size_mb: 1024
+    tensor_shape: [3, 224, 224]
+    compile_model: true  # All configs use compilation
+    timeout_s: 5400      # 90 minutes - max-autotune compilation takes much longer
+
+  hardware:
+    gpu_ids: [0]         # Single GPU for clean comparison
+    numa_nodes: [0]      # Local NUMA for best performance
+
+  # Systematic warmup scaling for large models with max-autotune mode
+  # Focus on sophisticated kernel fusion rather than launch overhead reduction
+  vit_configs:
+    # === PRIMARY SCALING STUDY: vit32x18x1024 ===
+    # Our main test case that showed 0.1% slower with insufficient warmup
+    
+    - name: "vit32x18x1024_max-autotune_warmup1000"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 1000  # Current baseline (no benefit observed)
+    
+    - name: "vit32x18x1024_max-autotune_warmup2500"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 2500  # Moderate extension
+    
+    - name: "vit32x18x1024_max-autotune_warmup5000"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 5000  # Research-suggested minimum for autotuning
+    
+    - name: "vit32x18x1024_max-autotune_warmup7500"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 7500  # Extensive autotuning
+    
+    - name: "vit32x18x1024_max-autotune_warmup10000"
+      patch_size: 32
+      depth: 18
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 10000  # Maximum feasible for exhaustive search
+
+    # === HIGH-DENSITY MODEL: vit16x24x1024 ===
+    # New model with 4x more patches (196 vs 49) - different optimization profile
+    
+    - name: "vit16x24x1024_max-autotune_warmup1000"
+      patch_size: 16
+      depth: 24
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 1000  # Baseline comparison
+    
+    - name: "vit16x24x1024_max-autotune_warmup5000"
+      patch_size: 16
+      depth: 24
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 5000  # Key test point
+    
+    - name: "vit16x24x1024_max-autotune_warmup10000"
+      patch_size: 16
+      depth: 24
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 10000  # Maximum optimization
+
+    # === VALIDATION: vit32x24x1024 ===
+    # Largest model for validation of scaling behavior
+    
+    - name: "vit32x24x1024_max-autotune_warmup5000"
+      patch_size: 32
+      depth: 24
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 5000  # Key test point
+    
+    - name: "vit32x24x1024_max-autotune_warmup10000"
+      patch_size: 32
+      depth: 24
+      heads: 16
+      dim: 1024
+      mlp_dim: 4096
+      compile_model: true
+      compile_mode: "max-autotune"
+      warmup_samples: 10000  # Maximum optimization
+
+# Expected autotuning progression:
+# 1000 samples:  Basic compilation, minimal kernel fusion
+# 2500 samples:  Moderate fusion exploration
+# 5000 samples:  Extensive tile size optimization (expected first improvements)
+# 7500 samples:  Advanced memory layout testing
+# 10000 samples: Exhaustive configuration search (expected maximum benefit)
+#
+# Success criteria: >10% performance improvement at 5000+ warmup samples
+# Target mechanism: Memory bandwidth reduction through sophisticated kernel fusion
